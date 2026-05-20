@@ -93,6 +93,8 @@ def build_engine(registry: StrategyRegistry) -> tuple[TradingEngine, BaseBroker]
         stagnation_threshold=trading.get("stagnation_threshold", 0.005),
         trailing_activate_ratio=trading.get("trailing_activate_ratio", 0.01),
         trailing_stop_ratio=trading.get("trailing_stop_ratio", 0.01),
+        profit_protect_activate=trading.get("profit_protect_activate", 0.008),
+        profit_protect_ratio=trading.get("profit_protect_ratio", 0.005),
     )
     market_config = US_MARKET if market == "us" else KR_MARKET
     return TradingEngine(broker, registry, risk, market_config=market_config), broker

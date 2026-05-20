@@ -979,6 +979,8 @@ async def get_settings() -> dict[str, Any]:
             "max_position_ratio": r.max_position_ratio,
             "trailing_activate_ratio": float(r.trailing_activate_ratio),
             "trailing_stop_ratio": float(r.trailing_stop_ratio),
+            "profit_protect_activate": float(r.profit_protect_activate),
+            "profit_protect_ratio": float(r.profit_protect_ratio),
         }
     strats = {}
     if _registry_ref:
@@ -1035,6 +1037,10 @@ async def update_settings(body: dict[str, Any]) -> dict[str, Any]:
             rm.trailing_activate_ratio = Decimal(str(r["trailing_activate_ratio"]))
         if r.get("trailing_stop_ratio") is not None:
             rm.trailing_stop_ratio = Decimal(str(r["trailing_stop_ratio"]))
+        if r.get("profit_protect_activate") is not None:
+            rm.profit_protect_activate = Decimal(str(r["profit_protect_activate"]))
+        if r.get("profit_protect_ratio") is not None:
+            rm.profit_protect_ratio = Decimal(str(r["profit_protect_ratio"]))
         applied.append("risk")
 
     if "strategies" in body and _registry_ref:
@@ -1075,7 +1081,8 @@ async def persist_settings() -> dict[str, Any]:
     for k in ("auto_start", "symbols", "max_position_size",
               "max_position_ratio", "max_open_positions",
               "stop_loss_ratio",
-              "trailing_activate_ratio", "trailing_stop_ratio"):
+              "trailing_activate_ratio", "trailing_stop_ratio",
+              "profit_protect_activate", "profit_protect_ratio"):
         v = settings.get(f"trading.{k}")
         if v is not None:
             trading[k] = v
@@ -1097,6 +1104,8 @@ async def persist_settings() -> dict[str, Any]:
         trading["max_position_ratio"] = rm.max_position_ratio
         trading["trailing_activate_ratio"] = float(rm.trailing_activate_ratio)
         trading["trailing_stop_ratio"] = float(rm.trailing_stop_ratio)
+        trading["profit_protect_activate"] = float(rm.profit_protect_activate)
+        trading["profit_protect_ratio"] = float(rm.profit_protect_ratio)
 
     # strategy enabled lists + params
     if _registry_ref:

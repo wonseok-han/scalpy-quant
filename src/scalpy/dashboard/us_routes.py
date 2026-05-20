@@ -605,6 +605,8 @@ async def get_settings() -> dict[str, Any]:
             "max_open_positions": r.max_open_positions,
             "trailing_activate_ratio": float(r.trailing_activate_ratio),
             "trailing_stop_ratio": float(r.trailing_stop_ratio),
+            "profit_protect_activate": float(r.profit_protect_activate),
+            "profit_protect_ratio": float(r.profit_protect_ratio),
         }
     strats = {}
     if _registry_ref:

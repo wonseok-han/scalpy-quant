@@ -597,6 +597,8 @@ class TradingEngine:
             await self._force_close(pos, reason="stop_loss")
         elif self._risk.check_trailing_stop(pos):
             await self._force_close(pos, reason="trailing_stop")
+        elif self._risk.check_profit_protect(pos):
+            await self._force_close(pos, reason="profit_protect")
         elif self._risk.check_stagnation(pos):
             await self._force_close(pos, reason="stagnation")
 

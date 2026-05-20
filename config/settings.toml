@@ -38,7 +38,7 @@ max_position_ratio = 0.5
 # 동시 보유 최대 포지션 수 (초과 시 신규 매수 차단)
 max_open_positions = 2
 # 장 마감 시 자동 청산 (true: 스캘핑 기본, false: 퀀트 오버나이트 보유)
-market_close_liquidate = false
+market_close_liquidate = true
 # 손절 비율 (0.02 = 2%, 평균단가 대비 하락 시 자동 청산)
 stop_loss_ratio = 0.02
 # Trailing Stop: 고점 추적 매도
@@ -46,6 +46,11 @@ stop_loss_ratio = 0.02
 trailing_activate_ratio = 0.015
 # 매도 기준 (0.005 = 0.5%, 고점 대비 이 이상 하락 시 매도)
 trailing_stop_ratio = 0.005
+# Profit Protect: 소폭 수익 보호 (trailing 활성화 전 구간)
+# 활성화 기준 (0.008 = 0.8%, 매수가 대비 고점이 이 이상 수익 도달 이력 시 보호 시작)
+profit_protect_activate = 0.008
+# 매도 기준 (0.005 = 0.5%, 고점 대비 이 이상 하락 시 매도)
+profit_protect_ratio = 0.005
 # 강제 청산 분할 매도 횟수 (1 = 전량 일괄, 3 = 3분할 매도, 슬리피지 방지)
 force_close_splits = 3
 # 횡보 청산: N시간 보유 후 수익률이 ±threshold 이내이면 자동 청산 (0 = 비활성화)
@@ -185,6 +190,8 @@ market_close_liquidate = true
 stop_loss_ratio = 0.015
 trailing_activate_ratio = 0.015
 trailing_stop_ratio = 0.005
+profit_protect_activate = 0.008
+profit_protect_ratio = 0.005
 force_close_splits = 1
 min_hold_seconds = 60
 close_cooldown_seconds = 300
