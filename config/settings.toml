@@ -32,7 +32,7 @@ auto_start = false
 # 자동매매 대상 종목코드 목록 (최대 20종목, WebSocket 구독 제한)
 symbols = ["005930", "000660"]
 # 종목당 최대 보유 수량
-max_position_size = 100
+max_position_size = 1000
 # 종목당 최대 투입 비율 (0.3 = 잔고의 30%, 가격 × 수량이 이 비율 초과 시 수량 축소)
 max_position_ratio = 0.5
 # 동시 보유 최대 포지션 수 (초과 시 신규 매수 차단)
@@ -183,7 +183,7 @@ auto_start = false
 symbols = ["AAPL", "MSFT", "NVDA"]
 # 기본 거래소 (NASD/NYSE/AMEX, 스크리닝 시 3거래소 자동 통합 스캔)
 exchange = "NASD"
-max_position_size = 100
+max_position_size = 1000
 max_position_ratio = 0.5
 max_open_positions = 2
 market_close_liquidate = true

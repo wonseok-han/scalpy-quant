@@ -34,7 +34,7 @@ _SSE_EVENTS = [
     "tick.received", "order.filled", "signal.generated",
     "position.opened", "position.closed", "position.updated",
     "screening.completed", "engine.started", "engine.stopped",
-    "engine.daily_init",
+    "engine.daily_init", "trade_sync.updated",
 ]
 
 _QUANT_STRATEGIES = {"momentum", "mean_reversion", "factor", "ichimoku", "volume_spike"}
@@ -324,12 +324,49 @@ async def get_signals() -> list[dict[str, Any]]:
 
 @us_router.get("/trades")
 async def get_trades() -> list[dict[str, Any]]:
-    if not _trade_repo_ref:
-        return []
+    db_trades: list[dict[str, Any]] = []
+    if _trade_repo_ref:
+        try:
+            db_trades = _trade_repo_ref.get_trades_today(market="us")
+        except Exception:
+            pass
+    if db_trades:
+        return db_trades
     try:
-        return _trade_repo_ref.get_trades_today(market="us")
-    except Exception:
-        return []
+        broker = await _get_us_broker()
+        if broker and broker._connected:
+            raw = await broker.get_trade_history()
+            if raw and _trade_repo_ref:
+                engine = _engine_ref
+                reasons = getattr(engine, "_trade_reasons", {}) if engine else {}
+                strats = getattr(engine, "_symbol_strategy", {}) if engine else {}
+                _trade_repo_ref.sync_trades(raw, reason_map=reasons, market="us", strategy_map=strats)
+                return _trade_repo_ref.get_trades_today(market="us")
+            return [
+                {
+                    "order_no": t.get("order_no", ""),
+                    "symbol": t.get("symbol", ""),
+                    "name": t.get("name", ""),
+                    "side": t.get("side", ""),
+                    "strategy": "",
+                    "reason": "",
+                    "price": str(t.get("avg_price", 0)),
+                    "quantity": t.get("tot_ccld_qty", 0),
+                    "ord_qty": t.get("ord_qty", 0),
+                    "ord_price": str(t.get("ord_price", 0)),
+                    "tot_ccld_amt": str(t.get("tot_ccld_amt", 0)),
+                    "rmn_qty": t.get("rmn_qty", 0),
+                    "fee": "0",
+                    "pnl": "",
+                    "pnl_pct": "",
+                    "time": f"{t['ord_time'][:2]}:{t['ord_time'][2:4]}:{t['ord_time'][4:6]}"
+                    if len(t.get("ord_time", "")) >= 6 else t.get("ord_time", ""),
+                }
+                for t in raw
+            ]
+    except Exception as e:
+        logger.warning("us_trades.fallback_failed", error=str(e))
+    return []
 
 
 @us_router.post("/actions/start")
@@ -496,18 +533,22 @@ async def get_balance() -> dict[str, Any]:
 
 
 _perf_cache: dict | None = None
+_perf_cache_ts: float = 0
+_PERF_CACHE_TTL = 30
 
 
 @us_router.get("/performance")
 async def get_performance() -> dict[str, Any]:
-    global _perf_cache
+    global _perf_cache, _perf_cache_ts
     if not _engine_ref:
         return {"data": {}}
-    if _perf_cache:
+    now = __import__("time").monotonic()
+    if _perf_cache is not None and (now - _perf_cache_ts) < _PERF_CACHE_TTL:
         return {"data": _perf_cache}
     if _trade_repo_ref:
         try:
             _perf_cache = _trade_repo_ref.get_strategy_performance(market="us")
+            _perf_cache_ts = now
             return {"data": _perf_cache}
         except Exception:
             pass

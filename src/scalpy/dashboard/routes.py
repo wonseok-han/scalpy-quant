@@ -50,7 +50,7 @@ _SSE_EVENTS = [
     "tick.received", "order.filled", "signal.generated",
     "position.opened", "position.closed", "position.updated",
     "screening.completed", "engine.started", "engine.stopped",
-    "engine.daily_init",
+    "engine.daily_init", "trade_sync.updated",
 ]
 
 

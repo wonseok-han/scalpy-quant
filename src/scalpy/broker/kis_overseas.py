@@ -56,6 +56,7 @@ class KISOverseasBroker(BaseBroker):
         self._token_expires: datetime = datetime.min
         self._last_api_call: float = 0
         self._api_lock = asyncio.Lock()
+        self._slippage: float = 0.003
 
     def _get_exchange(self, symbol: str) -> str:
         return self._symbol_exchange.get(symbol, self._exchange)
@@ -123,22 +124,30 @@ class KISOverseasBroker(BaseBroker):
             "custtype": "P",
         }
 
-    def _get(self, path: str, tr_id: str, params: dict) -> dict:
+    def _get(self, path: str, tr_id: str, params: dict, *, tr_cont: str = "") -> dict:
         url = f"{self._base_url()}{path}"
-        resp = requests.get(url, headers=self._headers(tr_id), params=params, timeout=10)
+        headers = self._headers(tr_id)
+        if tr_cont:
+            headers["tr_cont"] = tr_cont
+        resp = requests.get(url, headers=headers, params=params, timeout=10)
         if resp.status_code >= 400:
             body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
             msg_cd = body.get("msg_cd", "")
             if "token" in body.get("msg1", "").lower() or msg_cd == "EGW00121":
                 self._refresh_token()
+                headers = self._headers(tr_id)
+                if tr_cont:
+                    headers["tr_cont"] = tr_cont
                 time_mod.sleep(0.5)
-                resp = requests.get(url, headers=self._headers(tr_id), params=params, timeout=10)
+                resp = requests.get(url, headers=headers, params=params, timeout=10)
             elif msg_cd == "EGW00201":
                 time_mod.sleep(1)
-                resp = requests.get(url, headers=self._headers(tr_id), params=params, timeout=10)
+                resp = requests.get(url, headers=headers, params=params, timeout=10)
             else:
                 resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        data["_tr_cont"] = resp.headers.get("tr_cont", "")
+        return data
 
     def _post(self, path: str, tr_id: str, body: dict) -> dict:
         url = f"{self._base_url()}{path}"
@@ -192,7 +201,11 @@ class KISOverseasBroker(BaseBroker):
             if cfg["market_order_ok"] and order.order_type == OrderType.MARKET:
                 price_str = "0"
             else:
-                price_str = f"{float(order.price):.2f}"
+                slippage = 1 + self._slippage if order.side == Side.BUY else 1 - self._slippage
+                price_str = f"{float(order.price) * slippage:.2f}"
+                logger.debug("kis_overseas.order_price", symbol=order.symbol,
+                             side=order.side.value, base_price=str(order.price),
+                             slippage_price=price_str, session=session)
 
             exg = self._get_exchange(order.symbol)
             body = {
@@ -483,48 +496,83 @@ class KISOverseasBroker(BaseBroker):
         if not self._connected:
             return []
         trades: list[dict[str, Any]] = []
-        today = datetime.now().strftime("%Y%m%d")
+        now = datetime.now()
+        today = now.strftime("%Y%m%d")
+        yesterday = (now - timedelta(days=1)).strftime("%Y%m%d")
+        start_dt = yesterday if now.hour < 10 else today
         for exg_code in EXCHANGE_CODE_MAP:
-            await self._throttle()
-            try:
-                params = {
-                    "CANO": self._cano,
-                    "ACNT_PRDT_CD": self._acnt_prdt_cd,
-                    "PDNO": "",
-                    "ORD_STRT_DT": today,
-                    "ORD_END_DT": today,
-                    "SLL_BUY_DVSN": "00",
-                    "CCLD_NCCS_DVSN": "00",
-                    "OVRS_EXCG_CD": exg_code,
-                    "SORT_SQN": "DS",
-                    "ORD_DT": "",
-                    "ORD_GNO_BRNO": "",
-                    "ODNO": "",
-                    "CTX_AREA_FK200": "",
-                    "CTX_AREA_NK200": "",
-                }
-                data = await asyncio.to_thread(
-                    self._get, "/uapi/overseas-stock/v1/trading/inquire-ccnl", "TTTS3035R", params
-                )
-                for item in data.get("output", []):
-                    ft_ccld_qty = int(item.get("ft_ccld_qty", "0"))
-                    if ft_ccld_qty == 0:
-                        continue
-                    side_cd = item.get("sll_buy_dvsn_cd", "")
-                    trades.append({
-                        "order_no": item.get("odno", ""),
-                        "order_date": item.get("ord_dt", ""),
-                        "symbol": item.get("pdno", ""),
-                        "name": item.get("prdt_name", ""),
-                        "side": "sell" if side_cd == "01" else "buy",
-                        "ord_qty": int(item.get("ft_ord_qty", "0")),
-                        "tot_ccld_qty": ft_ccld_qty,
-                        "avg_price": float(item.get("ft_ccld_unpr3", "0")),
-                        "tot_ccld_amt": float(item.get("ft_ccld_amt3", "0")),
-                        "exchange": exg_code,
-                    })
-            except Exception as e:
-                logger.warning("kis_overseas.trade_history_partial", exchange=exg_code, error=str(e))
+            ctx_fk = ""
+            ctx_nk = ""
+            page = 0
+            while page < 5:
+                await self._throttle()
+                try:
+                    params = {
+                        "CANO": self._cano,
+                        "ACNT_PRDT_CD": self._acnt_prdt_cd,
+                        "PDNO": "",
+                        "ORD_STRT_DT": start_dt,
+                        "ORD_END_DT": today,
+                        "SLL_BUY_DVSN": "00",
+                        "CCLD_NCCS_DVSN": "01",
+                        "OVRS_EXCG_CD": exg_code,
+                        "SORT_SQN": "DS",
+                        "ORD_DT": "",
+                        "ORD_GNO_BRNO": "",
+                        "ODNO": "",
+                        "CTX_AREA_FK200": ctx_fk,
+                        "CTX_AREA_NK200": ctx_nk,
+                    }
+                    cont = "N" if page > 0 else ""
+                    data = await asyncio.to_thread(
+                        self._get, "/uapi/overseas-stock/v1/trading/inquire-ccnl",
+                        "TTTS3035R", params, tr_cont=cont,
+                    )
+                    rt_cd = data.get("rt_cd", "")
+                    items = data.get("output", [])
+                    if rt_cd != "0":
+                        logger.warning("kis_overseas.trade_history_api_fail",
+                                       exchange=exg_code, rt_cd=rt_cd,
+                                       msg=data.get("msg1", ""), msg_cd=data.get("msg_cd", ""))
+                        break
+                    logger.debug("kis_overseas.trade_history_page",
+                                exchange=exg_code, page=page, count=len(items),
+                                start=start_dt, end=today,
+                                tr_cont=data.get("_tr_cont", ""))
+                    for item in items:
+                        ft_ccld_qty = int(item.get("ft_ccld_qty", "0"))
+                        if ft_ccld_qty == 0:
+                            continue
+                        side_cd = item.get("sll_buy_dvsn_cd", "")
+                        trades.append({
+                            "order_no": item.get("odno", ""),
+                            "order_date": item.get("ord_dt", ""),
+                            "ord_time": item.get("ord_tmd", ""),
+                            "symbol": item.get("pdno", ""),
+                            "name": item.get("prdt_name", ""),
+                            "side": "sell" if side_cd == "01" else "buy",
+                            "ord_qty": int(item.get("ft_ord_qty", "0")),
+                            "ord_price": float(item.get("ft_ord_unpr3", "0")),
+                            "tot_ccld_qty": ft_ccld_qty,
+                            "avg_price": float(item.get("ft_ccld_unpr3", "0")),
+                            "tot_ccld_amt": float(item.get("ft_ccld_amt3", "0")),
+                            "rmn_qty": int(item.get("nccs_qty", "0")),
+                            "orgn_order_no": item.get("orgn_odno", ""),
+                            "ord_dvsn_cd": item.get("ord_dvsn_cd", ""),
+                            "cncl_yn": item.get("cncl_yn", ""),
+                            "exchange": exg_code,
+                        })
+                    resp_cont = data.get("_tr_cont", "")
+                    ctx_fk = data.get("ctx_area_fk200", "")
+                    ctx_nk = data.get("ctx_area_nk200", "")
+                    if resp_cont not in ("F", "M") or not items:
+                        break
+                    page += 1
+                except Exception as e:
+                    logger.warning("kis_overseas.trade_history_partial",
+                                   exchange=exg_code, page=page, error=str(e))
+                    break
+        logger.info("kis_overseas.trade_history_total", count=len(trades))
         return trades
 
     async def get_top_volume_stocks(self, count: int = 30) -> list[dict[str, Any]]:

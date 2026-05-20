@@ -192,6 +192,21 @@ def create_app(
             init_routes(kr_st, se, new_engine, bus=b, stream=new_stream, registry=new_registry, trade_repo=tr)
             init_us_routes(us_st, se, None)
 
+        from scalpy.main import update_trade_sync_broker
+        update_trade_sync_broker(new_broker, new_engine)
+
+        if app.state.trade_repo:
+            try:
+                trades = await new_broker.get_trade_history()
+                if trades:
+                    reasons = getattr(new_engine, "_trade_reasons", {}) if new_engine else {}
+                    strats = getattr(new_engine, "_symbol_strategy", {}) if new_engine else {}
+                    count = app.state.trade_repo.sync_trades(trades, reason_map=reasons, market=target, strategy_map=strats)
+                    if count:
+                        logger.info("market_switch.trade_sync", count=count, market=target)
+            except Exception as e:
+                logger.warning("market_switch.trade_sync_failed", error=str(e))
+
         logger.info("market_switch.done", market=target)
         return {"success": True, "market": target}
 

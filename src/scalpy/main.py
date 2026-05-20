@@ -101,6 +101,23 @@ def build_engine(registry: StrategyRegistry) -> tuple[TradingEngine, BaseBroker]
 
 
 _TRADE_SYNC_INTERVAL = 60
+_TRADE_SYNC_FILL_DELAY = 3
+
+
+_current_sync_broker: "BaseBroker | None" = None
+_current_sync_engine: "TradingEngine | None" = None
+_trade_sync_nudge: asyncio.Event | None = None
+
+
+def update_trade_sync_broker(broker: "BaseBroker", engine: "TradingEngine | None" = None) -> None:
+    global _current_sync_broker, _current_sync_engine
+    _current_sync_broker = broker
+    _current_sync_engine = engine
+
+
+def nudge_trade_sync() -> None:
+    if _trade_sync_nudge:
+        _trade_sync_nudge.set()
 
 
 async def _trade_sync_loop(
@@ -108,29 +125,43 @@ async def _trade_sync_loop(
     trade_repo: "TradeRepository",
     stop_event: asyncio.Event,
     engine: "TradingEngine | None" = None,
+    bus: "EventBus | None" = None,
 ) -> None:
+    global _current_sync_broker, _current_sync_engine, _trade_sync_nudge
+    _current_sync_broker = broker
+    _current_sync_engine = engine
+    _trade_sync_nudge = asyncio.Event()
     mock = settings.get("mock", True)
-    market = settings.get("market", "kr")
     while not stop_event.is_set():
         try:
-            trades = await broker.get_trade_history()
+            b = _current_sync_broker or broker
+            e = _current_sync_engine or engine
+            market = settings.get("market", "kr")
+            trades = await b.get_trade_history()
+            logger.debug("trade_sync.fetched", count=len(trades), market=market)
             if trades:
-                reasons = getattr(engine, "_trade_reasons", {}) if engine else {}
-                count = trade_repo.sync_trades(trades, reason_map=reasons, market=market)
+                reasons = getattr(e, "_trade_reasons", {}) if e else {}
+                strats = getattr(e, "_symbol_strategy", {}) if e else {}
+                count = trade_repo.sync_trades(trades, reason_map=reasons, market=market, strategy_map=strats)
                 if count:
                     logger.info("trade_sync.new_trades", count=count)
+                    if bus:
+                        await bus.emit("trade_sync.updated", {"count": count, "market": market})
             if not mock:
-                profit_records = await broker.get_period_pnl()
+                profit_records = await b.get_period_pnl()
                 if profit_records:
                     trade_repo.correct_pnl_from_api(profit_records)
         except Exception as e:
             logger.error("trade_sync.error", error=str(e))
 
+        _trade_sync_nudge.clear()
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=_TRADE_SYNC_INTERVAL)
             break
         except asyncio.TimeoutError:
             pass
+        if _trade_sync_nudge.is_set():
+            await asyncio.sleep(_TRADE_SYNC_FILL_DELAY)
 
 
 _QUANT_STRATEGIES = {"momentum", "mean_reversion", "factor", "ichimoku", "volume_spike"}
@@ -469,7 +500,7 @@ async def run() -> None:
         logger.info("scalpy.telegram_enabled")
 
     if trade_repo:
-        asyncio.create_task(_trade_sync_loop(broker, trade_repo, stop_event, engine))
+        asyncio.create_task(_trade_sync_loop(broker, trade_repo, stop_event, engine, bus=bus))
         logger.info("scalpy.trade_sync_started", interval=_TRADE_SYNC_INTERVAL)
 
     if auto_start:

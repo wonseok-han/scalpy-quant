@@ -71,11 +71,14 @@ def get_us_session(*, summer_time: bool = True) -> str:
     return "regular"
 
 
-def get_order_config(session: str, *, mock: bool = False) -> dict:
+def get_order_config(session: str, *, mock: bool = False) -> dict | None:
     """세션별 주문 API 설정 반환.
 
-    Returns: {"path": str, "tr_id_buy": str, "tr_id_sell": str, "market_order_ok": bool}
+    Returns: {"path", "tr_id_buy", "tr_id_sell", "market_order_ok"}
     None if session is closed or mock daytime.
+
+    market_order_ok: True only for regular session (OVRS_ORD_UNPR="0" 시장가).
+    프리마켓/애프터마켓/주간거래는 지정가만 가능.
     """
     if session == "closed":
         return None
@@ -93,5 +96,5 @@ def get_order_config(session: str, *, mock: bool = False) -> dict:
         "path": ORDER_PATH_REGULAR,
         "tr_id_buy": tr_ids["buy"],
         "tr_id_sell": tr_ids["sell"],
-        "market_order_ok": True,
+        "market_order_ok": session == "regular",
     }

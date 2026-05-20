@@ -115,6 +115,8 @@ class USMarketDataStream:
         self._recv_task: asyncio.Task[None] | None = None
         self._stopping = False
         self._last_tick: dict[str, tuple[Decimal, int]] = {}
+        self._last_ask: dict[str, Decimal] = {}
+        self._last_bid: dict[str, Decimal] = {}
 
     def on_tick(self, callback: TickCallback) -> None:
         self._tick_callbacks.append(callback)
@@ -127,6 +129,12 @@ class USMarketDataStream:
 
     def on_vi(self, callback: Any) -> None:
         pass
+
+    def get_latest_ask(self, symbol: str) -> Decimal | None:
+        return self._last_ask.get(symbol)
+
+    def get_latest_bid(self, symbol: str) -> Decimal | None:
+        return self._last_bid.get(symbol)
 
     async def emit_tick(self, symbol: str, price: Decimal, volume: int) -> None:
         for cb in self._tick_callbacks:
@@ -289,14 +297,22 @@ class USMarketDataStream:
         return raw_symbol[4:] if len(raw_symbol) > 4 else raw_symbol
 
     async def _on_execution(self, data: str) -> None:
-        """HDFSCNT0 필드: SYMB^ZDIV^TYMD^XYMD^XHMS^KYMD^KHMS^OPEN^HIGH^LOW^LAST^SIGN^DIFF^RATE^PBID^PASK^VBID^VASK^EVOL^TVOL^..."""
+        """HDFSCNT0 (RSYM offset +1): [0]RSYM [1]SYMB ... [11]LAST [19]EVOL"""
         fields = data.split("^")
         symbol = self._strip_prefix(fields[0])
-        price = Decimal(fields[10])
+        n = len(fields)
+
+        price = Decimal(fields[11])
         try:
-            volume = int(float(fields[18])) if len(fields) > 18 and fields[18] else 0
+            volume = int(float(fields[19])) if n > 19 and fields[19] else 0
         except (ValueError, IndexError):
             volume = 0
+
+        now_kst = datetime.now().strftime("%H%M%S")
+        logger.debug("us_tick.raw", symbol=symbol, last=str(price),
+                     low=fields[10] if n > 10 else "",
+                     volume=volume, sys_time=now_kst, field_count=n)
+
         last = self._last_tick.get(symbol)
         if last and last[0] == price and last[1] == volume:
             return
@@ -304,20 +320,33 @@ class USMarketDataStream:
         await self.emit_tick(symbol, price, volume)
 
     async def _on_orderbook_data(self, data: str) -> None:
-        """HDFSASP0 필드: SYMB^ZDIV^XYMD^XHMS^KYMD^KHMS^BVOL^AVOL^BDVL^ADVL^PBID1^PASK1^VBID1^VASK1^..."""
+        """HDFSASP0 (RSYM offset +1): [0]RSYM [1]SYMB ... [11]PBID1 [12]PASK1 [13]VBID1 [14]VASK1"""
         fields = data.split("^")
         symbol = self._strip_prefix(fields[0])
+        n = len(fields)
         asks: list[tuple[Decimal, int]] = []
         bids: list[tuple[Decimal, int]] = []
-        if len(fields) > 13:
-            bid_price = Decimal(fields[10]) if fields[10] else Decimal("0")
-            ask_price = Decimal(fields[11]) if fields[11] else Decimal("0")
-            bid_vol = int(float(fields[12])) if fields[12] else 0
-            ask_vol = int(float(fields[13])) if fields[13] else 0
+
+        if n > 14:
+            bid_price = Decimal(fields[11]) if fields[11] else Decimal("0")
+            ask_price = Decimal(fields[12]) if fields[12] else Decimal("0")
+            bid_vol = int(float(fields[13])) if fields[13] else 0
+            ask_vol = int(float(fields[14])) if fields[14] else 0
             if ask_price > 0:
                 asks.append((ask_price, ask_vol))
+                self._last_ask[symbol] = ask_price
             if bid_price > 0:
                 bids.append((bid_price, bid_vol))
+                self._last_bid[symbol] = bid_price
+
+        logger.debug("us_tick.raw_ob", symbol=symbol, field_count=n,
+                     f0=fields[0][:12] if fields[0] else "",
+                     f11_bid=fields[11] if n > 11 else "",
+                     f12_ask=fields[12] if n > 12 else "",
+                     f13_bvol=fields[13] if n > 13 else "",
+                     f14_avol=fields[14] if n > 14 else "",
+                     bid1=str(bids[0][0]) if bids else "0",
+                     ask1=str(asks[0][0]) if asks else "0")
         await self.emit_orderbook(symbol, asks, bids)
 
     async def _on_fill_notice(self, data: str) -> None:

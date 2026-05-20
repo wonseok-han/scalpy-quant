@@ -45,26 +45,52 @@ class TradeRepository:
             with self._engine.begin() as conn:
                 conn.execute(text("ALTER TABLE trades ADD COLUMN market VARCHAR(4) DEFAULT 'kr'"))
             logger.info("migration.added_market_column")
+        self._migrate_price_columns()
+
+    def _migrate_price_columns(self) -> None:
+        """avg_price/ord_price 등 INTEGER → NUMERIC(15,4) 마이그레이션."""
+        insp = inspect(self._engine)
+        if not insp.has_table("trades"):
+            return
+        cols = {c["name"]: c for c in insp.get_columns("trades")}
+        avg_col = cols.get("avg_price")
+        if avg_col is None:
+            return
+        col_type = str(avg_col["type"])
+        if "NUMERIC" in col_type.upper() or "DOUBLE" in col_type.upper() or "REAL" in col_type.upper():
+            return
+        price_cols = ["ord_price", "avg_price", "tot_ccld_amt", "fee", "pnl"]
+        with self._engine.begin() as conn:
+            for col in price_cols:
+                if col in cols:
+                    conn.execute(text(
+                        f"ALTER TABLE trades ALTER COLUMN {col} TYPE NUMERIC(15,4) USING {col}::numeric"
+                    ))
+        logger.info("migration.converted_price_columns_to_numeric")
 
     def recreate_trades_table(self) -> None:
         TradeRow.__table__.drop(self._engine, checkfirst=True)
         TradeRow.__table__.create(self._engine, checkfirst=True)
 
-    def sync_trades(self, trades: list[dict], reason_map: dict[str, str] | None = None, market: str = "kr") -> int:
+    def sync_trades(self, trades: list[dict], reason_map: dict[str, str] | None = None, market: str = "kr", strategy_map: dict[str, str] | None = None) -> int:
         """ccld API 데이터를 DB에 upsert. (order_no, order_date) 기준."""
         if not trades:
             return 0
         reasons = reason_map or {}
+        ext_strats = strategy_map or {}
 
         new_count = 0
         update_count = 0
 
         with Session(self._engine) as session:
             existing: dict[tuple[str, str], int] = {}
-            today = date.today().strftime("%Y%m%d")
+            trade_dates = {t.get("order_date", "") for t in trades if t.get("order_no")}
+            trade_dates.discard("")
+            if not trade_dates:
+                trade_dates = {date.today().strftime("%Y%m%d")}
             rows = session.execute(
                 select(TradeRow.order_no, TradeRow.order_date, TradeRow.tot_ccld_qty).where(
-                    TradeRow.order_date == today,
+                    TradeRow.order_date.in_(trade_dates),
                     TradeRow.mock == self._mock,
                 )
             ).all()
@@ -85,10 +111,20 @@ class TradeRepository:
             for cp in closed_pos:
                 if cp.symbol not in strat_map:
                     strat_map[cp.symbol] = cp.strategy
+            # positions 테이블에 없으면 기존 trades에서 같은 심볼의 strategy 참조
+            existing_strats = session.execute(
+                select(TradeRow.symbol, TradeRow.strategy).where(
+                    TradeRow.strategy != "",
+                    TradeRow.mock == self._mock,
+                ).group_by(TradeRow.symbol, TradeRow.strategy)
+            ).all()
+            for es in existing_strats:
+                if es.symbol not in strat_map:
+                    strat_map[es.symbol] = es.strategy
 
             for t in trades:
                 order_no = t.get("order_no", "")
-                order_date = t.get("order_date", "") or today
+                order_date = t.get("order_date", "") or date.today().strftime("%Y%m%d")
                 if not order_no:
                     continue
 
@@ -122,7 +158,7 @@ class TradeRepository:
                         orgn_order_no=t.get("orgn_order_no", ""),
                         ord_dvsn_cd=t.get("ord_dvsn_cd", ""),
                         cncl_yn=t.get("cncl_yn", ""),
-                        strategy=strat_map.get(symbol, ""),
+                        strategy=strat_map.get(symbol, "") or ext_strats.get(symbol, ""),
                         reason=reason,
                         fee=fee,
                         mock=self._mock,
@@ -152,16 +188,17 @@ class TradeRepository:
             total = new_count + update_count
             if total:
                 session.commit()
-                self._recalc_pnl(session, today)
+                for td in trade_dates:
+                    self._recalc_pnl(session, td)
                 logger.info("trade_sync.committed", new=new_count, updated=update_count)
         return new_count + update_count
 
-    def _calc_fee(self, t: dict) -> int:
-        amt = t.get("tot_ccld_amt", 0)
-        commission = int(amt * float(_COMMISSION_RATE))
+    def _calc_fee(self, t: dict) -> float:
+        amt = float(t.get("tot_ccld_amt", 0))
+        commission = round(amt * float(_COMMISSION_RATE), 4)
         if t.get("side") == "sell":
-            tax = int(amt * float(_SELL_TAX_RATE))
-            return commission + tax
+            tax = round(amt * float(_SELL_TAX_RATE), 4)
+            return round(commission + tax, 4)
         return commission
 
     def _recalc_pnl(self, session: Session, order_date: str) -> None:
@@ -189,10 +226,10 @@ class TradeRepository:
                 ).order_by(TradeRow.order_date, TradeRow.ord_time)
             ).all()
 
-            buy_queue: list[tuple[int, float, int]] = []
+            buy_queue: list[tuple[int, float, float]] = []
             for b in buys:
                 if b.tot_ccld_qty > 0 and b.avg_price > 0:
-                    buy_queue.append((b.tot_ccld_qty, float(b.avg_price), b.fee))
+                    buy_queue.append((b.tot_ccld_qty, float(b.avg_price), float(b.fee)))
 
             qi = 0
             remaining = buy_queue[0][0] if buy_queue else 0
@@ -204,12 +241,12 @@ class TradeRepository:
 
                 to_match = sell.tot_ccld_qty
                 total_buy_cost = 0.0
-                total_buy_fee = 0
+                total_buy_fee = 0.0
 
                 while to_match > 0 and qi < len(buy_queue):
                     take = min(to_match, remaining)
                     total_buy_cost += take * buy_queue[qi][1]
-                    total_buy_fee += buy_queue[qi][2] * take // buy_queue[qi][0]
+                    total_buy_fee += buy_queue[qi][2] * take / buy_queue[qi][0]
                     to_match -= take
                     remaining -= take
                     if remaining <= 0:
@@ -222,7 +259,7 @@ class TradeRepository:
 
                 matched_qty = sell.tot_ccld_qty
                 buy_avg = total_buy_cost / matched_qty
-                sell.pnl = int((sell.avg_price - buy_avg) * matched_qty - sell.fee - total_buy_fee)
+                sell.pnl = round((float(sell.avg_price) - buy_avg) * matched_qty - float(sell.fee) - total_buy_fee, 4)
 
         session.commit()
 
@@ -308,10 +345,10 @@ class TradeRepository:
                     ).order_by(TradeRow.order_date, TradeRow.ord_time)
                 ).all()
 
-                buy_queue: list[tuple[int, float, int]] = []
+                buy_queue: list[tuple[int, float, float]] = []
                 for b in buys:
                     if b.tot_ccld_qty > 0 and b.avg_price > 0:
-                        buy_queue.append((b.tot_ccld_qty, float(b.avg_price), b.fee))
+                        buy_queue.append((b.tot_ccld_qty, float(b.avg_price), float(b.fee)))
 
                 qi = 0
                 remaining = buy_queue[0][0] if buy_queue else 0
@@ -323,12 +360,12 @@ class TradeRepository:
 
                     to_match = sell.tot_ccld_qty
                     total_buy_cost = 0.0
-                    total_buy_fee = 0
+                    total_buy_fee = 0.0
 
                     while to_match > 0 and qi < len(buy_queue):
                         take = min(to_match, remaining)
                         total_buy_cost += take * buy_queue[qi][1]
-                        total_buy_fee += buy_queue[qi][2] * take // buy_queue[qi][0]
+                        total_buy_fee += buy_queue[qi][2] * take / buy_queue[qi][0]
                         to_match -= take
                         remaining -= take
                         if remaining <= 0:
@@ -341,56 +378,66 @@ class TradeRepository:
 
                     matched_qty = sell.tot_ccld_qty
                     buy_avg = total_buy_cost / matched_qty
-                    sell.pnl = int((sell.avg_price - buy_avg) * matched_qty - sell.fee - total_buy_fee)
+                    sell.pnl = round((float(sell.avg_price) - buy_avg) * matched_qty - float(sell.fee) - total_buy_fee, 4)
                     updated += 1
 
             session.commit()
             logger.info("recalc_all_pnl.done", symbols=len(symbols), updated=updated)
             return updated
 
-    def get_daily_pnl(self, day: date | None = None, market: str | None = None) -> int:
-        day_str = (day or date.today()).strftime("%Y%m%d")
+    def _daily_dates(self, day: date | None, market: str | None) -> list[str]:
+        from datetime import datetime, timedelta
+        now = datetime.now()
+        if day:
+            return [day.strftime("%Y%m%d")]
+        today = now.date()
+        if market == "us" and now.hour < 10:
+            yesterday = today - timedelta(days=1)
+            return [today.strftime("%Y%m%d"), yesterday.strftime("%Y%m%d")]
+        return [today.strftime("%Y%m%d")]
+
+    def get_daily_pnl(self, day: date | None = None, market: str | None = None) -> float:
+        dates = self._daily_dates(day, market)
         with Session(self._engine) as session:
             q = select(func.coalesce(func.sum(TradeRow.pnl), 0)).where(
                 TradeRow.side == "sell",
-                TradeRow.order_date == day_str,
+                TradeRow.order_date.in_(dates),
                 TradeRow.mock == self._mock,
             )
             if market:
                 q = q.where(TradeRow.market == market)
-            return int(session.scalar(q) or 0)
+            return float(session.scalar(q) or 0)
 
     def get_daily_trade_count(self, day: date | None = None, market: str | None = None) -> int:
-        day_str = (day or date.today()).strftime("%Y%m%d")
+        dates = self._daily_dates(day, market)
         with Session(self._engine) as session:
             q = select(func.count(TradeRow.id)).where(
-                TradeRow.order_date == day_str,
+                TradeRow.order_date.in_(dates),
                 TradeRow.mock == self._mock,
             )
             if market:
                 q = q.where(TradeRow.market == market)
             return session.scalar(q) or 0
 
-    def get_daily_fees(self, day: date | None = None, market: str | None = None) -> int:
-        day_str = (day or date.today()).strftime("%Y%m%d")
+    def get_daily_fees(self, day: date | None = None, market: str | None = None) -> float:
+        dates = self._daily_dates(day, market)
         with Session(self._engine) as session:
             q = select(func.coalesce(func.sum(TradeRow.fee), 0)).where(
-                TradeRow.order_date == day_str,
+                TradeRow.order_date.in_(dates),
                 TradeRow.mock == self._mock,
             )
             if market:
                 q = q.where(TradeRow.market == market)
-            return int(session.scalar(q) or 0)
+            return float(session.scalar(q) or 0)
 
 
     def get_strategy_performance(self, day: date | None = None, market: str | None = None) -> dict[str, dict]:
         """trades 테이블에서 전략별 라운드트립(매수→매도) 기반 성과 집계."""
-        day = day or date.today()
-        day_str = day.strftime("%Y%m%d")
+        dates = self._daily_dates(day, market)
         with Session(self._engine) as session:
             q = select(TradeRow.symbol).where(
                 TradeRow.side == "sell",
-                TradeRow.order_date == day_str,
+                TradeRow.order_date.in_(dates),
                 TradeRow.mock == self._mock,
                 TradeRow.strategy != "",
             )
@@ -413,7 +460,7 @@ class TradeRepository:
                 sq = select(TradeRow).where(
                     TradeRow.symbol == symbol,
                     TradeRow.side == "sell",
-                    TradeRow.order_date == day_str,
+                    TradeRow.order_date.in_(dates),
                     TradeRow.mock == self._mock,
                 )
                 if market:
@@ -422,10 +469,10 @@ class TradeRepository:
                     sq.order_by(TradeRow.order_date, TradeRow.ord_time)
                 ).all()
 
-                buy_queue: list[tuple[int, float, str, str, int]] = []
+                buy_queue: list[tuple[int, float, str, str, float]] = []
                 for b in buys:
                     if b.tot_ccld_qty > 0 and b.avg_price > 0:
-                        buy_queue.append((b.tot_ccld_qty, float(b.avg_price), b.order_date, b.strategy, b.fee))
+                        buy_queue.append((b.tot_ccld_qty, float(b.avg_price), b.order_date, b.strategy, float(b.fee)))
 
                 qi = 0
                 remaining = buy_queue[0][0] if buy_queue else 0
@@ -439,13 +486,13 @@ class TradeRepository:
 
                     to_match = sell.tot_ccld_qty
                     total_buy_cost = 0.0
-                    total_buy_fee = 0
+                    total_buy_fee = 0.0
                     buy_date = buy_queue[qi][2] if qi < len(buy_queue) else sell.order_date
 
                     while to_match > 0 and qi < len(buy_queue):
                         take = min(to_match, remaining)
                         total_buy_cost += take * buy_queue[qi][1]
-                        total_buy_fee += buy_queue[qi][4] * take // buy_queue[qi][0]
+                        total_buy_fee += buy_queue[qi][4] * take / buy_queue[qi][0]
                         buy_date = buy_queue[qi][2]
                         to_match -= take
                         remaining -= take
@@ -459,9 +506,9 @@ class TradeRepository:
                     matched_qty = sell.tot_ccld_qty
                     buy_avg = total_buy_cost / matched_qty
                     if sell.pnl is not None:
-                        pnl = sell.pnl
+                        pnl = float(sell.pnl)
                     else:
-                        pnl = int((sell.avg_price - buy_avg) * matched_qty - sell.fee - total_buy_fee)
+                        pnl = round((float(sell.avg_price) - buy_avg) * matched_qty - float(sell.fee) - total_buy_fee, 4)
                     buy_total = buy_avg * matched_qty + total_buy_fee
                     pnl_pct = round(pnl / buy_total * 100, 2) if buy_total > 0 else 0.0
                     cross_day = buy_date != sell.order_date
@@ -527,7 +574,7 @@ class TradeRepository:
                 day_trades += s["trades"]
                 day_wins += s["wins"]
                 day_losses += s["losses"]
-                day_pnl += int(s["total_pnl"])
+                day_pnl += float(s["total_pnl"])
             cumulative_pnl += day_pnl
             result.append({
                 "date": f"{day_str[:4]}-{day_str[4:6]}-{day_str[6:]}",
@@ -615,10 +662,19 @@ class TradeRepository:
             return result
 
     def get_trades_today(self, day: date | None = None, market: str | None = None) -> list[dict]:
-        day_str = (day or date.today()).strftime("%Y%m%d")
+        from datetime import datetime as _dt
+        now = _dt.now()
+        if day:
+            dates = [(day).strftime("%Y%m%d")]
+        elif market == "us" and now.hour < 10:
+            today = now.date()
+            yesterday = today - __import__("datetime").timedelta(days=1)
+            dates = [today.strftime("%Y%m%d"), yesterday.strftime("%Y%m%d")]
+        else:
+            dates = [now.strftime("%Y%m%d")]
         with Session(self._engine) as session:
             q = select(TradeRow).where(
-                TradeRow.order_date == day_str, TradeRow.mock == self._mock,
+                TradeRow.order_date.in_(dates), TradeRow.mock == self._mock,
             )
             if market:
                 q = q.where(TradeRow.market == market)

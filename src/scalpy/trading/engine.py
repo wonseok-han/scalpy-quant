@@ -64,6 +64,8 @@ class TradingEngine:
         self._trade_reasons: dict[str, str] = {}
         self._position_pnl: dict[str, Decimal] = {}
         self._position_strategy: dict[str, str] = {}
+        self._symbol_strategy: dict[str, str] = {}
+        self._closing_symbols: set[str] = set()
 
     def set_trade_repo(self, repo: Any) -> None:
         self._trade_repo = repo
@@ -501,6 +503,8 @@ class TradingEngine:
             return
         if result.status == OrderStatus.FILLED:
             self.positions.update_on_fill(result)
+            from scalpy.main import nudge_trade_sync
+            nudge_trade_sync()
             if self._bus:
                 await self._bus.emit(
                     "order.filled",
@@ -516,6 +520,7 @@ class TradingEngine:
                     self._trade_reasons[result.symbol] = "signal"
                     self._position_pnl[result.symbol] = Decimal("0")
                     self._position_strategy[result.symbol] = result.strategy
+                    self._symbol_strategy[result.symbol] = result.strategy
                     if self._trade_repo:
                         try:
                             self._trade_repo.save_position_open(result.symbol, result.strategy)
@@ -603,6 +608,15 @@ class TradingEngine:
             await self._force_close(pos, reason="stagnation")
 
     async def _force_close(self, pos: Position, reason: str = "") -> None:
+        if pos.symbol in self._closing_symbols:
+            return
+        self._closing_symbols.add(pos.symbol)
+        try:
+            await self._do_force_close(pos, reason=reason)
+        finally:
+            self._closing_symbols.discard(pos.symbol)
+
+    async def _do_force_close(self, pos: Position, reason: str = "") -> None:
         if reason == "stop_loss" or not self._trade_repo:
             splits = 1
         else:
