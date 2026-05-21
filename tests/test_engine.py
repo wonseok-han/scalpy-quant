@@ -44,6 +44,11 @@ class TestTradingEngine:
         self.risk = RiskManager(stop_loss_ratio=0.02)
         self.engine = TradingEngine(self.broker, self.registry, self.risk)
         self.engine._is_market_hours = lambda: True
+        self.engine._market = type("MockMarket", (), {
+            "is_buy_cutoff": lambda self, now=None: False,
+            "is_close_window": lambda self, now=None: False,
+            "timezone": __import__("zoneinfo").ZoneInfo("Asia/Seoul"),
+        })()
         self._time_patch = patch(
             "scalpy.trading.engine.datetime",
             wraps=datetime,
