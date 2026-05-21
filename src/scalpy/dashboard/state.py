@@ -49,6 +49,20 @@ class DashboardState:
         bus.subscribe("screening.completed", self._on_screening)
         bus.subscribe("tick.received", self._on_tick)
 
+    def unregister_handlers(self, bus: EventBus) -> None:
+        for event, handler in [
+            ("order.filled", self._on_order_filled),
+            ("signal.generated", self._on_signal),
+            ("engine.started", self._on_engine_started),
+            ("engine.stopped", self._on_engine_stopped),
+            ("screening.completed", self._on_screening),
+            ("tick.received", self._on_tick),
+        ]:
+            try:
+                bus.unsubscribe(event, handler)
+            except ValueError:
+                pass
+
     def _on_order_filled(self, data: dict[str, Any]) -> None:
         self.trades.appendleft(TradeRecord(
             time=datetime.now().strftime("%H:%M:%S"),

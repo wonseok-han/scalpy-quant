@@ -25,7 +25,6 @@ class BaseStrategy(ABC):
         self._backtest_mode: bool = False
         self.cooldown_ticks: int = 1
         self.stop_loss_ratio: float | None = None
-        self.take_profit_ratio: float | None = None
 
     def reset(self) -> None:
         self._last_signal_at.clear()

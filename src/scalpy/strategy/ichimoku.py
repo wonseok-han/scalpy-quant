@@ -40,12 +40,16 @@ class IchimokuStrategy(BaseStrategy):
         self.candle_minutes: int = 1
         self.cooldown_seconds: int = 300
         self.stop_loss_ratio: float | None = 0.025
-        self.take_profit_ratio: float | None = None
+
         self.min_tick_volume: int = 5
+        self.max_cloud_distance: float = 0.01
+        self.max_candle_range: float = 0.03
+        self.open_grace_candles: int = 10
         self._candles: dict[str, deque[_Candle]] = {}
         self._current_candle: dict[str, _Candle] = {}
         self._candle_start: dict[str, datetime] = {}
         self._live_candle_count: dict[str, int] = {}
+        self._realtime_candle_count: dict[str, int] = {}
 
     def reset(self) -> None:
         super().reset()
@@ -53,13 +57,15 @@ class IchimokuStrategy(BaseStrategy):
         self._current_candle.clear()
         self._candle_start.clear()
         self._live_candle_count.clear()
+        self._realtime_candle_count.clear()
 
     def _get_candles(self, symbol: str) -> deque[_Candle]:
         if symbol not in self._candles:
             self._candles[symbol] = deque(maxlen=self.senkou_b_period + 5)
         return self._candles[symbol]
 
-    def _rotate_candle(self, symbol: str, price: Decimal, now: datetime) -> None:
+    def _rotate_candle(self, symbol: str, price: Decimal, now: datetime) -> bool:
+        """봉 갱신. 새 봉이 열렸으면 True 반환."""
         candles = self._get_candles(symbol)
         start = self._candle_start.get(symbol)
         interval = self.candle_minutes * 60
@@ -67,7 +73,7 @@ class IchimokuStrategy(BaseStrategy):
         if start is None:
             self._candle_start[symbol] = now
             self._current_candle[symbol] = _Candle(price)
-            return
+            return False
 
         elapsed = (now - start).total_seconds()
         if elapsed >= interval:
@@ -75,15 +81,21 @@ class IchimokuStrategy(BaseStrategy):
                 candles.append(self._current_candle[symbol])
                 count = self._live_candle_count.get(symbol, 0) + 1
                 self._live_candle_count[symbol] = count
+                rt = self._realtime_candle_count.get(symbol, 0) + 1
+                self._realtime_candle_count[symbol] = rt
                 if count <= self.senkou_b_period and count % 10 == 0:
                     logger.info("ichimoku.warmup", symbol=symbol, candles=count, need=self.senkou_b_period)
+                if rt == self.open_grace_candles:
+                    logger.info("ichimoku.grace_done", symbol=symbol, realtime_candles=rt)
             self._candle_start[symbol] = now
             self._current_candle[symbol] = _Candle(price)
+            return True
         else:
             if symbol in self._current_candle:
                 self._current_candle[symbol].update(price)
             else:
                 self._current_candle[symbol] = _Candle(price)
+            return False
 
     def _midpoint(self, candles: list[_Candle], period: int) -> Decimal | None:
         if len(candles) < period:
@@ -95,9 +107,6 @@ class IchimokuStrategy(BaseStrategy):
 
     def _compute(self, symbol: str) -> dict | None:
         candles = list(self._get_candles(symbol))
-        cur = self._current_candle.get(symbol)
-        if cur:
-            candles = candles + [cur]
 
         tenkan = self._midpoint(candles, self.tenkan_period)
         kijun = self._midpoint(candles, self.kijun_period)
@@ -117,7 +126,20 @@ class IchimokuStrategy(BaseStrategy):
             return None
         self._advance_tick(symbol)
         now = datetime.now()
-        self._rotate_candle(symbol, price, now)
+        rotated = self._rotate_candle(symbol, price, now)
+
+        if not rotated:
+            return None
+
+        candles = list(self._get_candles(symbol))
+        if not candles:
+            return None
+        last = candles[-1]
+
+        candle_range = float(last.high - last.low) / float(last.close) if last.close > 0 else 0
+        if candle_range > self.max_candle_range:
+            logger.debug("ichimoku.skip", symbol=symbol, reason="candle_range", value=round(candle_range, 4), limit=self.max_candle_range)
+            return None
 
         candle_count = self._live_candle_count.get(symbol, 0)
         if candle_count < self.senkou_b_period:
@@ -127,34 +149,43 @@ class IchimokuStrategy(BaseStrategy):
         if ichi is None:
             return None
 
+        last_close = last.close
+
         tenkan = ichi["tenkan"]
         kijun = ichi["kijun"]
         cloud_top = max(ichi["senkou_a"], ichi["senkou_b"])
         cloud_bottom = min(ichi["senkou_a"], ichi["senkou_b"])
 
-        above_cloud = price > cloud_top
-        below_cloud = price < cloud_bottom
+        above_cloud = last_close > cloud_top
+        below_cloud = last_close < cloud_bottom
         tk_bull = tenkan > kijun
         tk_bear = tenkan < kijun
 
-        if above_cloud and tk_bull and self._check_cooldown(symbol, "BUY"):
-            spread = float(price - cloud_top) / float(cloud_top) if cloud_top else 0
+        if above_cloud and tk_bull:
+            rt = self._realtime_candle_count.get(symbol, 0)
+            if rt < self.open_grace_candles:
+                logger.debug("ichimoku.skip", symbol=symbol, reason="grace_period", candles=rt, need=self.open_grace_candles)
+                return None
+            spread = float(last_close - cloud_top) / float(cloud_top) if cloud_top else 0
+            if spread > self.max_cloud_distance:
+                logger.debug("ichimoku.skip", symbol=symbol, reason="overheated", spread=round(spread, 4), limit=self.max_cloud_distance)
+                return None
+            if not self._check_cooldown(symbol, "BUY"):
+                logger.debug("ichimoku.skip", symbol=symbol, reason="cooldown", side="BUY")
+                return None
             confidence = min(0.85, 0.5 + spread * 20)
-            return Signal(symbol, Side.BUY, self.name, price, 0, confidence, now)
+            return Signal(symbol, Side.BUY, self.name, last_close, 0, confidence, now)
 
-        # SELL: 구름 하단 이탈 + TK 베어 (완전 반전, 최강)
         if below_cloud and tk_bear and self._check_cooldown(symbol, "SELL"):
-            spread = float(cloud_bottom - price) / float(cloud_bottom) if cloud_bottom else 0
+            spread = float(cloud_bottom - last_close) / float(cloud_bottom) if cloud_bottom else 0
             confidence = min(0.85, 0.5 + spread * 20)
-            return Signal(symbol, Side.SELL, self.name, price, 0, confidence, now)
+            return Signal(symbol, Side.SELL, self.name, last_close, 0, confidence, now)
 
-        # SELL: 기준선 이탈 (가격이 kijun 아래, 아직 구름 밑은 아닌 경우)
-        if not below_cloud and price < kijun and self._check_cooldown(symbol, "SELL"):
-            return Signal(symbol, Side.SELL, self.name, price, 0, 0.7, now)
+        if not below_cloud and last_close < kijun and self._check_cooldown(symbol, "SELL"):
+            return Signal(symbol, Side.SELL, self.name, last_close, 0, 0.7, now)
 
-        # SELL: TK 데드크로스 (구름 위에서 전환선 < 기준선, 추세 약화 초기 신호)
         if above_cloud and tk_bear and self._check_cooldown(symbol, "SELL"):
-            return Signal(symbol, Side.SELL, self.name, price, 0, 0.6, now)
+            return Signal(symbol, Side.SELL, self.name, last_close, 0, 0.6, now)
 
         return None
 

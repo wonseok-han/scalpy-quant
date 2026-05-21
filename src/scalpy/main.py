@@ -7,6 +7,7 @@ import structlog
 from scalpy.broker.base import BaseBroker
 from scalpy.broker.mock import MockBroker
 from scalpy.config import settings
+from scalpy.core.market import KR_MARKET, US_MARKET
 from scalpy.data.stream import MarketDataStream
 from scalpy.events import EventBus
 from scalpy.strategy.factor import FactorStrategy
@@ -14,6 +15,7 @@ from scalpy.strategy.ichimoku import IchimokuStrategy
 from scalpy.strategy.mean_reversion import MeanReversionStrategy
 from scalpy.strategy.momentum import MomentumStrategy
 from scalpy.strategy.registry import StrategyRegistry
+from scalpy.strategy.volume_spike import VolumeSpikeStrategy
 from scalpy.trading.engine import TradingEngine
 from scalpy.trading.risk import RiskManager
 
@@ -27,6 +29,7 @@ def build_registry() -> StrategyRegistry:
         MeanReversionStrategy(),
         FactorStrategy(),
         IchimokuStrategy(),
+        VolumeSpikeStrategy(),
     ]
     quant_enabled = set(settings.get("strategies.quant_enabled", ["momentum"]))
     for s in all_strategies:
@@ -48,9 +51,23 @@ def build_registry() -> StrategyRegistry:
 def build_broker() -> BaseBroker:
     mock = settings.get("mock", True)
     app_key = settings.get("kis_app_key", "")
+    market = settings.get("market", "kr")
 
     if not app_key:
         return MockBroker()
+
+    if market == "us":
+        from scalpy.broker.kis_overseas import KISOverseasBroker
+
+        exchange = settings.get("us_trading.exchange", "NASD")
+        return KISOverseasBroker(
+            app_key=app_key,
+            app_secret=settings.get("kis_app_secret", ""),
+            account_no=settings.get("kis_account_no", ""),
+            mock=mock,
+            exchange=exchange,
+            summer_time=settings.get("us_trading.summer_time", True),
+        )
 
     from scalpy.broker.kis import KISBroker
 
@@ -64,10 +81,11 @@ def build_broker() -> BaseBroker:
 
 def build_engine(registry: StrategyRegistry) -> tuple[TradingEngine, BaseBroker]:
     broker = build_broker()
-    trading = settings.get("trading", {})
+    market = settings.get("market", "kr")
+    trading_key = "us_trading" if market == "us" else "trading"
+    trading = settings.get(trading_key, {})
     risk = RiskManager(
         stop_loss_ratio=trading.get("stop_loss_ratio", 0.02),
-        take_profit_ratio=trading.get("take_profit_ratio", 0.03),
         max_position_size=trading.get("max_position_size", 100),
         max_open_positions=trading.get("max_open_positions", 3),
         max_position_ratio=trading.get("max_position_ratio", 0.3),
@@ -75,13 +93,31 @@ def build_engine(registry: StrategyRegistry) -> tuple[TradingEngine, BaseBroker]
         stagnation_threshold=trading.get("stagnation_threshold", 0.005),
         trailing_activate_ratio=trading.get("trailing_activate_ratio", 0.01),
         trailing_stop_ratio=trading.get("trailing_stop_ratio", 0.01),
-        profit_protect_activate=trading.get("profit_protect_activate", 0),
-        profit_protect_ratio=trading.get("profit_protect_ratio", 0.001),
+        profit_protect_activate=trading.get("profit_protect_activate", 0.008),
+        profit_protect_ratio=trading.get("profit_protect_ratio", 0.005),
     )
-    return TradingEngine(broker, registry, risk), broker
+    market_config = US_MARKET if market == "us" else KR_MARKET
+    return TradingEngine(broker, registry, risk, market_config=market_config), broker
 
 
 _TRADE_SYNC_INTERVAL = 60
+_TRADE_SYNC_FILL_DELAY = 3
+
+
+_current_sync_broker: "BaseBroker | None" = None
+_current_sync_engine: "TradingEngine | None" = None
+_trade_sync_nudge: asyncio.Event | None = None
+
+
+def update_trade_sync_broker(broker: "BaseBroker", engine: "TradingEngine | None" = None) -> None:
+    global _current_sync_broker, _current_sync_engine
+    _current_sync_broker = broker
+    _current_sync_engine = engine
+
+
+def nudge_trade_sync() -> None:
+    if _trade_sync_nudge:
+        _trade_sync_nudge.set()
 
 
 async def _trade_sync_loop(
@@ -89,31 +125,46 @@ async def _trade_sync_loop(
     trade_repo: "TradeRepository",
     stop_event: asyncio.Event,
     engine: "TradingEngine | None" = None,
+    bus: "EventBus | None" = None,
 ) -> None:
+    global _current_sync_broker, _current_sync_engine, _trade_sync_nudge
+    _current_sync_broker = broker
+    _current_sync_engine = engine
+    _trade_sync_nudge = asyncio.Event()
     mock = settings.get("mock", True)
     while not stop_event.is_set():
         try:
-            trades = await broker.get_trade_history()
+            b = _current_sync_broker or broker
+            e = _current_sync_engine or engine
+            market = settings.get("market", "kr")
+            trades = await b.get_trade_history()
+            logger.debug("trade_sync.fetched", count=len(trades), market=market)
             if trades:
-                reasons = getattr(engine, "_trade_reasons", {}) if engine else {}
-                count = trade_repo.sync_trades(trades, reason_map=reasons)
+                reasons = getattr(e, "_trade_reasons", {}) if e else {}
+                strats = getattr(e, "_symbol_strategy", {}) if e else {}
+                count = trade_repo.sync_trades(trades, reason_map=reasons, market=market, strategy_map=strats)
                 if count:
                     logger.info("trade_sync.new_trades", count=count)
+                    if bus:
+                        await bus.emit("trade_sync.updated", {"count": count, "market": market})
             if not mock:
-                profit_records = await broker.get_period_pnl()
+                profit_records = await b.get_period_pnl()
                 if profit_records:
                     trade_repo.correct_pnl_from_api(profit_records)
         except Exception as e:
             logger.error("trade_sync.error", error=str(e))
 
+        _trade_sync_nudge.clear()
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=_TRADE_SYNC_INTERVAL)
             break
         except asyncio.TimeoutError:
             pass
+        if _trade_sync_nudge.is_set():
+            await asyncio.sleep(_TRADE_SYNC_FILL_DELAY)
 
 
-_QUANT_STRATEGIES = {"momentum", "mean_reversion", "factor", "ichimoku"}
+_QUANT_STRATEGIES = {"momentum", "mean_reversion", "factor", "ichimoku", "volume_spike"}
 
 
 def _apply_strategies(registry: StrategyRegistry) -> None:
@@ -163,8 +214,13 @@ async def _start_trading(
         symbols.extend(quant_symbols)
 
     if not symbols:
-        symbols = settings.get("trading.symbols", ["005930"])
+        market = settings.get("market", "kr")
+        default_sym = ["AAPL"] if market == "us" else ["005930"]
+        trading_key = "us_trading" if market == "us" else "trading"
+        symbols = settings.get(f"{trading_key}.symbols", default_sym)
 
+    if hasattr(stream, 'set_symbol_exchanges') and hasattr(engine._broker, '_symbol_exchange'):
+        stream.set_symbol_exchanges(engine._broker._symbol_exchange)
     await stream.start(symbols)
     _prefill_from_ohlcv(engine, symbols)
     await engine.prefill_minute_candles(symbols)
@@ -195,6 +251,7 @@ async def _quant_scan(
         pass
 
     universe = quant_cfg.get("universe", [])
+    live_data: dict[str, dict] = {}
     if not universe:
         try:
             from scalpy.screening.quant_screener import scan_market_universe
@@ -204,6 +261,10 @@ async def _quant_scan(
             top_n = quant_cfg.get("universe_size", 100)
             stocks = scan_market_universe(min_vol, min_cr, max_cr, 0, top_n, max_price)
             universe = [s["symbol"] for s in stocks]
+            live_data = {
+                s["symbol"]: {"change_rate": s["change_rate"], "volume": s["volume"], "amount": s["amount"]}
+                for s in stocks
+            }
             logger.info("quant.market_universe", candidates=len(universe))
         except Exception as e:
             logger.warning("quant.market_universe_failed", error=str(e))
@@ -230,7 +291,7 @@ async def _quant_scan(
         ichimoku_filter=ichi_on,
     )
     held = [p.symbol for p in engine.positions.all()]
-    symbols = screener.scan(universe, held_symbols=held)
+    symbols = screener.scan(universe, held_symbols=held, live_data=live_data or None)
 
     scan_results = screener.get_last_scan()
     if scan_results:
@@ -281,6 +342,7 @@ async def _quant_rescan_loop(
                 pass
 
             universe = list(quant_cfg.get("universe", []))
+            live_data: dict[str, dict] = {}
             if not universe:
                 try:
                     from scalpy.screening.quant_screener import scan_market_universe
@@ -293,6 +355,10 @@ async def _quant_rescan_loop(
                         max_price,
                     )
                     universe = [s["symbol"] for s in stocks]
+                    live_data = {
+                        s["symbol"]: {"change_rate": s["change_rate"], "volume": s["volume"], "amount": s["amount"]}
+                        for s in stocks
+                    }
                 except Exception:
                     universe = list(engine._active_symbols)
 
@@ -311,7 +377,7 @@ async def _quant_rescan_loop(
                 ichimoku_filter=ichi_on,
             )
             held = [p.symbol for p in engine.positions.all()]
-            new_symbols = screener.scan(universe, held_symbols=held)
+            new_symbols = screener.scan(universe, held_symbols=held, live_data=live_data or None)
             if new_symbols:
                 await stream.update_subscriptions(new_symbols)
                 await engine.update_symbols(new_symbols)
@@ -349,13 +415,27 @@ async def run() -> None:
     registry = build_registry()
     engine, broker = build_engine(registry)
     mock = settings.get("mock", True)
+    market = settings.get("market", "kr")
     hts_id = settings.get("kis_hts_id", "")
-    stream = MarketDataStream(
-        app_key=settings.get("kis_app_key", ""),
-        app_secret=settings.get("kis_app_secret", ""),
-        mock=mock,
-        hts_id=hts_id,
-    )
+
+    if market == "us":
+        from scalpy.data.us_stream import USMarketDataStream
+
+        exchange = settings.get("us_trading.exchange", "NASD")
+        stream = USMarketDataStream(
+            app_key=settings.get("kis_app_key", ""),
+            app_secret=settings.get("kis_app_secret", ""),
+            mock=mock,
+            hts_id=hts_id,
+            exchange=exchange,
+        )
+    else:
+        stream = MarketDataStream(
+            app_key=settings.get("kis_app_key", ""),
+            app_secret=settings.get("kis_app_secret", ""),
+            mock=mock,
+            hts_id=hts_id,
+        )
 
     stream.on_tick(engine.on_tick)
     stream.on_orderbook(engine.on_orderbook)
@@ -420,7 +500,7 @@ async def run() -> None:
         logger.info("scalpy.telegram_enabled")
 
     if trade_repo:
-        asyncio.create_task(_trade_sync_loop(broker, trade_repo, stop_event, engine))
+        asyncio.create_task(_trade_sync_loop(broker, trade_repo, stop_event, engine, bus=bus))
         logger.info("scalpy.trade_sync_started", interval=_TRADE_SYNC_INTERVAL)
 
     if auto_start:
@@ -477,6 +557,11 @@ async def run() -> None:
 
 
 def main() -> None:
+    from scalpy.logging import setup_logging
+
+    log_level = settings.get("log_level", "DEBUG")
+    setup_logging(log_dir="logs", level=log_level)
+
     logger.info("scalpy.initializing", version="0.1.0")
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(run())

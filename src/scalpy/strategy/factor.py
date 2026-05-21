@@ -2,9 +2,13 @@ from collections import deque
 from datetime import datetime
 from decimal import Decimal
 
+import structlog
+
 from scalpy.core.enums import Side
 from scalpy.core.models import Signal
 from scalpy.strategy.base import BaseStrategy
+
+logger = structlog.get_logger()
 
 
 class FactorStrategy(BaseStrategy):
@@ -22,7 +26,6 @@ class FactorStrategy(BaseStrategy):
         self.weight_orderbook: float = 0.3
         self.cooldown_seconds: int = 1800
         self.stop_loss_ratio: float | None = 0.025
-        self.take_profit_ratio: float | None = 0.04
         self.min_tick_volume: int = 5
         self._prices: dict[str, deque[Decimal]] = {}
         self._volumes: dict[str, deque[int]] = {}
@@ -119,15 +122,26 @@ class FactorStrategy(BaseStrategy):
             + (1 - o) * self.weight_orderbook
         )
 
-        if buy_score >= self.buy_threshold and m >= 0.5 and self._check_cooldown(symbol, "BUY"):
-            if self._is_short_term_declining(prices) or self._is_near_peak(prices):
+        if buy_score >= self.buy_threshold and m >= 0.5:
+            if not self._check_cooldown(symbol, "BUY"):
+                logger.debug("factor.skip", symbol=symbol, reason="cooldown", side="BUY", score=round(buy_score, 3))
+                return None
+            if self._is_short_term_declining(prices):
+                logger.debug("factor.skip", symbol=symbol, reason="declining", score=round(buy_score, 3))
+                return None
+            if self._is_near_peak(prices):
+                logger.debug("factor.skip", symbol=symbol, reason="near_peak", score=round(buy_score, 3))
                 return None
             if self._is_below_sma(prices):
+                logger.debug("factor.skip", symbol=symbol, reason="below_sma", score=round(buy_score, 3))
                 return None
             confidence = min(0.9, buy_score)
             return Signal(symbol, Side.BUY, self.name, price, 0, confidence, datetime.now())
 
-        if sell_score >= self.sell_threshold and m <= 0.5 and self._check_cooldown(symbol, "SELL"):
+        if sell_score >= self.sell_threshold and m <= 0.5:
+            if not self._check_cooldown(symbol, "SELL"):
+                logger.debug("factor.skip", symbol=symbol, reason="cooldown", side="SELL", score=round(sell_score, 3))
+                return None
             confidence = min(0.9, sell_score)
             return Signal(symbol, Side.SELL, self.name, price, 0, confidence, datetime.now())
 

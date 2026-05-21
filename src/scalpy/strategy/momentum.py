@@ -2,9 +2,13 @@ from collections import deque
 from datetime import datetime
 from decimal import Decimal
 
+import structlog
+
 from scalpy.core.enums import Side
 from scalpy.core.models import Signal
 from scalpy.strategy.base import BaseStrategy
+
+logger = structlog.get_logger()
 
 
 class MomentumStrategy(BaseStrategy):
@@ -19,7 +23,6 @@ class MomentumStrategy(BaseStrategy):
         self.breakout_pct: float = 0.005
         self.cooldown_seconds: int = 1800
         self.stop_loss_ratio: float | None = 0.03
-        self.take_profit_ratio: float | None = 0.05
         self._prices: dict[str, deque[Decimal]] = {}
         self._volumes: dict[str, deque[int]] = {}
 
@@ -55,7 +58,10 @@ class MomentumStrategy(BaseStrategy):
         recent_high = max(list(prices)[:-1])
         threshold = recent_high * (1 + Decimal(str(self.breakout_pct)))
 
-        if price >= threshold and self._check_cooldown(symbol, "BUY"):
+        if price >= threshold:
+            if not self._check_cooldown(symbol, "BUY"):
+                logger.debug("momentum.skip", symbol=symbol, reason="cooldown", side="BUY")
+                return None
             confidence = min(0.9, 0.6 + (volume / avg_vol - self.volume_multiplier) * 0.1)
             return Signal(symbol, Side.BUY, self.name, price, 0, confidence, datetime.now())
 

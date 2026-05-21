@@ -3,9 +3,13 @@ from collections import deque
 from datetime import datetime
 from decimal import Decimal
 
+import structlog
+
 from scalpy.core.enums import Side
 from scalpy.core.models import Signal
 from scalpy.strategy.base import BaseStrategy
+
+logger = structlog.get_logger()
 
 
 class _Candle:
@@ -38,12 +42,14 @@ class MeanReversionStrategy(BaseStrategy):
         self.candle_minutes: int = 3
         self.cooldown_seconds: int = 1800
         self.stop_loss_ratio: float | None = 0.025
-        self.take_profit_ratio: float | None = 0.04
         self.min_tick_volume: int = 5
+        self.max_candle_range: float = 0.03
+        self.open_grace_candles: int = 5
         self._candles: dict[str, deque[_Candle]] = {}
         self._current_candle: dict[str, _Candle] = {}
         self._candle_start: dict[str, datetime] = {}
         self._was_below: dict[str, bool] = {}
+        self._realtime_candle_count: dict[str, int] = {}
 
     def reset(self) -> None:
         super().reset()
@@ -51,13 +57,15 @@ class MeanReversionStrategy(BaseStrategy):
         self._current_candle.clear()
         self._candle_start.clear()
         self._was_below.clear()
+        self._realtime_candle_count.clear()
 
     def _get_candles(self, symbol: str) -> deque[_Candle]:
         if symbol not in self._candles:
             self._candles[symbol] = deque(maxlen=self.window + 5)
         return self._candles[symbol]
 
-    def _rotate_candle(self, symbol: str, price: Decimal, volume: int, now: datetime) -> None:
+    def _rotate_candle(self, symbol: str, price: Decimal, volume: int, now: datetime) -> bool:
+        """봉 갱신. 새 봉이 열렸으면 True 반환."""
         candles = self._get_candles(symbol)
         start = self._candle_start.get(symbol)
         interval = self.candle_minutes * 60
@@ -65,25 +73,25 @@ class MeanReversionStrategy(BaseStrategy):
         if start is None:
             self._candle_start[symbol] = now
             self._current_candle[symbol] = _Candle(price, volume)
-            return
+            return False
 
         elapsed = (now - start).total_seconds()
         if elapsed >= interval:
             if symbol in self._current_candle:
                 candles.append(self._current_candle[symbol])
+                self._realtime_candle_count[symbol] = self._realtime_candle_count.get(symbol, 0) + 1
             self._candle_start[symbol] = now
             self._current_candle[symbol] = _Candle(price, volume)
+            return True
         else:
             if symbol in self._current_candle:
                 self._current_candle[symbol].update(price, volume)
             else:
                 self._current_candle[symbol] = _Candle(price, volume)
+            return False
 
     def _bands(self, symbol: str) -> tuple[Decimal, Decimal, Decimal] | None:
         candles = list(self._get_candles(symbol))
-        cur = self._current_candle.get(symbol)
-        if cur:
-            candles = candles + [cur]
         if len(candles) < self.window:
             return None
         recent = [float(c.close) for c in candles[-self.window:]]
@@ -102,7 +110,22 @@ class MeanReversionStrategy(BaseStrategy):
             return None
         self._advance_tick(symbol)
         now = datetime.now()
-        self._rotate_candle(symbol, price, volume, now)
+        rotated = self._rotate_candle(symbol, price, volume, now)
+
+        if not rotated:
+            return None
+
+        candles = list(self._get_candles(symbol))
+        if not candles:
+            return None
+        last = candles[-1]
+
+        candle_range = float(last.high - last.low) / float(last.close) if last.close > 0 else 0
+        if candle_range > self.max_candle_range:
+            logger.debug("mean_rev.skip", symbol=symbol, reason="candle_range", value=round(candle_range, 4), limit=self.max_candle_range)
+            return None
+
+        last_close = last.close
 
         bands = self._bands(symbol)
         if bands is None:
@@ -111,19 +134,29 @@ class MeanReversionStrategy(BaseStrategy):
         lower, mid, upper = bands
         was_below = self._was_below.get(symbol, False)
 
-        if price < lower:
+        if last_close < lower:
             self._was_below[symbol] = True
+            logger.debug("mean_rev.below_band", symbol=symbol, price=str(last_close), lower=str(lower))
             return None
 
-        if was_below and price >= lower:
+        if was_below and last_close >= lower:
             self._was_below[symbol] = False
-            if self._check_cooldown(symbol, "BUY"):
-                dist = float(mid - price) / float(mid) if mid > 0 else 0
-                confidence = min(0.85, 0.6 + dist * 5)
-                return Signal(symbol, Side.BUY, self.name, price, 0, confidence, now)
+            rt = self._realtime_candle_count.get(symbol, 0)
+            if rt < self.open_grace_candles:
+                logger.debug("mean_rev.skip", symbol=symbol, reason="grace_period", candles=rt, need=self.open_grace_candles)
+                return None
+            if not self._check_cooldown(symbol, "BUY"):
+                logger.debug("mean_rev.skip", symbol=symbol, reason="cooldown", side="BUY")
+                return None
+            dist = float(mid - last_close) / float(mid) if mid > 0 else 0
+            confidence = min(0.85, 0.6 + dist * 5)
+            return Signal(symbol, Side.BUY, self.name, last_close, 0, confidence, now)
 
-        if price > upper and self._check_cooldown(symbol, "SELL"):
-            return Signal(symbol, Side.SELL, self.name, price, 0, 0.7, now)
+        if last_close > upper:
+            if not self._check_cooldown(symbol, "SELL"):
+                logger.debug("mean_rev.skip", symbol=symbol, reason="cooldown", side="SELL")
+                return None
+            return Signal(symbol, Side.SELL, self.name, last_close, 0, 0.7, now)
 
         return None
 

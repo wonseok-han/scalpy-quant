@@ -24,7 +24,7 @@ def strategy_registry() -> StrategyRegistry:
 
 @pytest.fixture
 def risk_manager() -> RiskManager:
-    return RiskManager(stop_loss_ratio=0.02, take_profit_ratio=0.03)
+    return RiskManager(stop_loss_ratio=0.02)
 
 
 @pytest.fixture

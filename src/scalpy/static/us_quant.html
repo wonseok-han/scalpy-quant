@@ -3,14 +3,14 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Scalpy Quant — Dashboard</title>
+<title>Scalpy Quant — US Market</title>
 <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
 <link href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css" rel="stylesheet">
 <link rel="stylesheet" href="/static/css/common.css">
 <style>
 /* ── Quant: purple accent override ── */
-:root { --accent: #8B5CF6; --accent-soft: rgba(139,92,246,0.12); --blue: #3B82F6; --blue-soft: rgba(59,130,246,0.12); }
-.brand-logo { background: linear-gradient(135deg, #8B5CF6, #EC4899); }
+:root { --accent: #3B82F6; --accent-soft: rgba(59,130,246,0.12); --blue: #3B82F6; --blue-soft: rgba(59,130,246,0.12); }
+.brand-logo { background: linear-gradient(135deg, #3B82F6, #06B6D4); }
 .nav-item.active::after { background: var(--accent); }
 
 /* ── Engine status ── */
@@ -117,7 +117,7 @@
     <div class="brand">
       <div class="brand-logo">Q</div>
       <div>
-        <h1>Scalpy Quant</h1>
+        <h1>Scalpy Quant <span style="font-size:0.6em;color:var(--accent);font-weight:400">US</span></h1>
         <div class="brand-meta">
           <span id="engine-status" class="engine-badge"><span class="pulse-dot off"></span> 대기</span>
           <span id="conn-badge" class="conn-badge conn-off">CONNECTING</span>
@@ -132,12 +132,12 @@
     </div>
   </div>
   <nav class="nav-bar">
-    <a href="/" class="nav-item active">대시보드</a>
+    <a href="/us" class="nav-item active">대시보드</a>
     <span class="nav-sep"></span>
     <a href="/backtest" class="nav-item">백테스트</a>
     <div class="market-toggle">
-      <a href="/kr" class="nav-item active" id="mt-kr"><span class="mt-dot live"></span> KRX</a>
-      <a href="javascript:void(0)" class="nav-item" id="mt-us" onclick="switchMarket('us')"><span class="mt-dot off"></span> US</a>
+      <a href="javascript:void(0)" class="nav-item" id="mt-kr" onclick="switchMarket('kr')"><span class="mt-dot off"></span> KRX</a>
+      <a href="/us" class="nav-item active" id="mt-us"><span class="mt-dot live"></span> US</a>
     </div>
   </nav>
 </div>
@@ -153,9 +153,9 @@
       <span class="mt-remaining" id="mt-remaining">--:--:--</span>
     </div>
     <div class="mt-schedule">
-      프리마켓 08:30~09:00<br>
-      정규장 09:00~15:30<br>
-      시간외 15:40~16:00
+      프리마켓 18:00~23:30 (KST)<br>
+      정규장 23:30~06:00 (KST)<br>
+      애프터 06:00~07:00 (KST)
     </div>
   </div>
 
@@ -179,7 +179,7 @@
     <div class="metric-card">
       <div class="metric-label">당일 실현손익</div>
       <div class="metric-value" id="daily-pnl">-</div>
-      <div class="metric-sub" id="daily-fees">수수료+세금: 0원</div>
+      <div class="metric-sub" id="daily-fees">Fees: $0</div>
     </div>
     <div class="metric-card">
       <div class="metric-label">보유 / 후보</div>
@@ -239,10 +239,10 @@
           <th>#</th>
           <th>종목</th>
           <th class="text-right">현재가</th>
-          <th class="text-right">모멘텀</th>
-          <th class="text-right">샤프</th>
-          <th class="text-right">거래대금</th>
+          <th class="text-right">등락률</th>
           <th class="text-right">거래량 급증</th>
+          <th class="text-right">거래대금</th>
+          <th class="text-right">모멘텀</th>
           <th class="text-right">ATR%</th>
           <th class="text-right">RSI</th>
           <th class="text-right">점수</th>
@@ -427,26 +427,40 @@
 
 <script src="/static/js/common.js"></script>
 <script>
-// ── Market Timer ──
-const _MARKET_SESSIONS = [
-  { name: '프리마켓', cls: 'pre', h1: 8, m1: 30, h2: 9, m2: 0 },
-  { name: '정규장', cls: 'open', h1: 9, m1: 0, h2: 15, m2: 30 },
-  { name: '시간외', cls: 'after', h1: 15, m1: 40, h2: 16, m2: 0 },
-];
-function _toMin(h,m){return h*60+m}
+// ── USD Formatter ──
+const usd=n=>{const v=Number(n);if(isNaN(v))return String(n);const a=Math.abs(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});return v<0?'-$'+a:'$'+a;};
+const usdPnl=n=>{const v=Number(n);const a=Math.abs(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});return v>=0?'+$'+a:'-$'+a;};
+
+// ── Market Timer (US KST: Pre 18:00~23:30, Regular 23:30~06:00, After 06:00~07:00) ──
+// 서버에서 KST 변환된 미국장 시간을 받아옴 (서머타임 자동 대응)
+let _mh={pre:17*60,open:22*60+30,close:5*60,after:9*60};
+fetch('/api/us/market-hours').then(r=>r.json()).then(d=>{
+  const p=s=>{const[h,m]=s.split(':').map(Number);return h*60+m;};
+  _mh={pre:p(d.pre_market_open),open:p(d.market_open),close:p(d.market_close),after:p(d.after_hours_close)};
+}).catch(()=>{});
 function _updateMarketTimer(){
   const now=new Date();
   const hh=String(now.getHours()).padStart(2,'0'),mm=String(now.getMinutes()).padStart(2,'0'),ss=String(now.getSeconds()).padStart(2,'0');
   document.getElementById('mt-clock').textContent=`${hh}:${mm}:${ss}`;
-  const nowMin=_toMin(now.getHours(),now.getMinutes());
+  const h=now.getHours(),m=now.getMinutes(),nowMin=h*60+m,day=now.getDay();
   const statusEl=document.getElementById('mt-status'),labelEl=document.getElementById('mt-label'),remainEl=document.getElementById('mt-remaining');
-  const day=now.getDay();
-  if(day===0||day===6){statusEl.textContent='휴장 (주말)';statusEl.className='mt-status closed';labelEl.textContent='월요일 개장까지';const d=day===0?1:2;const t=new Date(now);t.setDate(t.getDate()+d);t.setHours(9,0,0,0);remainEl.textContent=_fmtMs(t-now);return;}
-  for(const s of _MARKET_SESSIONS){const st=_toMin(s.h1,s.m1),en=_toMin(s.h2,s.m2);if(nowMin>=st&&nowMin<en){statusEl.textContent=s.name;statusEl.className='mt-status '+s.cls;const t=new Date(now);t.setHours(s.h2,s.m2,0,0);labelEl.textContent=s.name==='정규장'?'장 마감까지':s.name+' 종료까지';remainEl.textContent=_fmtMs(t-now);return;}}
+  const preM=_mh.pre,openM=_mh.open,closeM=_mh.close,afterM=_mh.after;
+  const _setTarget=(h,m)=>{const t=new Date(now);t.setHours(h,m||0,0,0);return t;};
+  // After-hours close~after (Tue~Sat)
+  if(nowMin>=closeM&&nowMin<afterM&&day>=2&&day<=6){statusEl.textContent='시간외';statusEl.className='mt-status after';labelEl.textContent='시간외 종료까지';remainEl.textContent=_fmtMs(_setTarget(Math.floor(afterM/60),afterM%60)-now);return;}
+  // Regular pre-midnight open~23:59 (Mon~Fri)
+  if(nowMin>=openM&&day>=1&&day<=5){statusEl.textContent='정규장';statusEl.className='mt-status open';labelEl.textContent='장 마감까지';const t=new Date(now);t.setDate(t.getDate()+1);t.setHours(Math.floor(closeM/60),closeM%60,0,0);remainEl.textContent=_fmtMs(t-now);return;}
+  // Regular post-midnight 00:00~close (Tue~Sat)
+  if(nowMin<closeM&&day>=2&&day<=6){statusEl.textContent='정규장';statusEl.className='mt-status open';labelEl.textContent='장 마감까지';remainEl.textContent=_fmtMs(_setTarget(Math.floor(closeM/60),closeM%60)-now);return;}
+  // Pre-market pre~open (Mon~Fri)
+  if(nowMin>=preM&&nowMin<openM&&day>=1&&day<=5){statusEl.textContent='프리마켓';statusEl.className='mt-status pre';labelEl.textContent='정규장까지';remainEl.textContent=_fmtMs(_setTarget(Math.floor(openM/60),openM%60)-now);return;}
+  // Closed
   statusEl.textContent='장 마감';statusEl.className='mt-status closed';
-  if(nowMin<_toMin(8,30)){labelEl.textContent='프리마켓까지';const t=new Date(now);t.setHours(8,30,0,0);remainEl.textContent=_fmtMs(t-now);}
-  else if(nowMin>=_toMin(15,30)&&nowMin<_toMin(15,40)){labelEl.textContent='시간외까지';const t=new Date(now);t.setHours(15,40,0,0);remainEl.textContent=_fmtMs(t-now);}
-  else{const n=new Date(now);n.setDate(n.getDate()+1);while(n.getDay()===0||n.getDay()===6)n.setDate(n.getDate()+1);n.setHours(9,0,0,0);const da=Math.round((n-new Date(now.getFullYear(),now.getMonth(),now.getDate()))/86400000);labelEl.textContent=da<=1?'내일 개장까지':'월요일 개장까지';remainEl.textContent=_fmtMs(n-now);}
+  const target=new Date(now);const preH=Math.floor(preM/60),preMin=preM%60;
+  if(day===6&&nowMin>=afterM){target.setDate(target.getDate()+2);target.setHours(preH,preMin,0,0);labelEl.textContent='월요일 프리마켓까지';}
+  else if(day===0){target.setDate(target.getDate()+1);target.setHours(preH,preMin,0,0);labelEl.textContent='월요일 프리마켓까지';}
+  else{target.setHours(preH,preMin,0,0);labelEl.textContent='프리마켓까지';}
+  remainEl.textContent=_fmtMs(target-now);
 }
 function _fmtMs(ms){if(ms<=0)return '00:00:00';const t=Math.floor(ms/1000);return String(Math.floor(t/3600)).padStart(2,'0')+':'+String(Math.floor((t%3600)/60)).padStart(2,'0')+':'+String(t%60).padStart(2,'0');}
 _updateMarketTimer();setInterval(_updateMarketTimer,1000);
@@ -530,7 +544,7 @@ function renderRiskTable(){
 }
 async function toggleStrat(name){
   try{
-    const r=await fetch('/api/strategies/'+name+'/toggle',{method:'POST'});
+    const r=await fetch('/api/us/strategies/'+name+'/toggle',{method:'POST'});
     const d=await r.json();
     if(d.success&&_quantStrats[name]){_quantStrats[name].enabled=d.enabled;renderQuantStrats();renderStratConfigs(_quantStrats);renderRiskTable();toast((_quantStrats[name].display_name||name)+(d.enabled?' 활성화':' 비활성화'),'success');}
   }catch(e){console.error(e);}
@@ -540,27 +554,26 @@ async function toggleStrat(name){
 function updateStatus(s){
   const bal=s.balance;
   const balEl=document.getElementById('balance');
-  balEl.textContent=bal==='-'?'--':fmt(bal)+'원';
+  balEl.textContent=bal==='-'?'--':usd(bal);
   const prevEl=document.getElementById('balance-prev');
   if(s.prev_balance&&s.prev_balance!=='0'&&bal!=='-'){
     const diff=Number(bal)-Number(s.prev_balance);
-    prevEl.textContent='전일 '+fmt(s.prev_balance)+'원 ('+(diff>=0?'+':'')+fmt(diff)+')';
+    prevEl.textContent='전일 '+usd(s.prev_balance)+' ('+usdPnl(diff)+')';
     prevEl.style.color=diff>=0?'var(--profit)':'var(--loss)';
   }
   if(s.daily_pnl!==undefined){
     const pnl=Number(s.daily_pnl);
     const el=document.getElementById('daily-pnl');
-    el.textContent=pnlSign(pnl)+'원';
+    el.textContent=usdPnl(pnl);
     el.className='metric-value '+(pnl>=0?'text-profit':'text-loss');
-    document.getElementById('daily-fees').textContent='체결 '+(s.trade_count||0)+'건 / 수수료 '+fmt(s.total_fees||0)+'원';
+    document.getElementById('daily-fees').textContent='체결 '+(s.trade_count||0)+'건 / 수수료 '+usd(s.total_fees||0);
   }
   _posCount=s.position_count;
   document.getElementById('pos-count').textContent=s.position_count;
   const inv=s.invested||'0';
-  document.getElementById('invested').textContent=inv==='0'?'-':fmt(inv)+'원';
-  const invN=Number(inv)||0;const balN=Number(bal)||0;
-  const avail=balN>0?String(balN-invN):'-';
-  document.getElementById('available-balance').textContent=avail==='-'?'-':fmt(avail)+'원';
+  document.getElementById('invested').textContent=inv==='0'?'-':usd(inv);
+  const avail=s.available_balance||'-';
+  document.getElementById('available-balance').textContent=avail==='-'?'-':usd(avail);
   document.getElementById('pending-orders').textContent='미체결: '+(s.pending_order_count||0)+'건';
   const engineEl=document.getElementById('engine-running');
   engineEl.textContent=s.running?'실행 중':'대기';
@@ -597,9 +610,9 @@ function updatePositions(list){
     return `<tr>
       <td><strong>${p.name||p.symbol}</strong><span class="text-sub">${p.symbol}</span></td>
       <td class="text-right">${p.quantity}</td>
-      <td class="text-right">${fmt(p.avg_price)}</td>
-      <td class="text-right">${fmt(p.current_price)}</td>
-      <td class="text-right"><span class="pnl-chip ${cls}">${pnlSign(pnl)}</span></td>
+      <td class="text-right">${usd(p.avg_price)}</td>
+      <td class="text-right">${usd(p.current_price)}</td>
+      <td class="text-right"><span class="pnl-chip ${cls}">${usdPnl(pnl)}</span></td>
       <td class="text-right"><span class="pnl-chip ${cls}">${p.pnl_pct>=0?'+':''}${p.pnl_pct}%</span></td>
       <td>${stratLabel(p.strategy)}</td>
       <td class="text-center"><button class="btn btn-danger" style="padding:4px 10px;font-size:0.72rem" onclick="liquidateOne('${p.symbol}')">청산</button></td>
@@ -618,7 +631,7 @@ function renderTradePage(){
   tb.innerHTML=items.map(t=>{
     const pnl=t.pnl?Number(t.pnl):null;
     const pct=t.pnl_pct!==''&&t.pnl_pct!==undefined?Number(t.pnl_pct):null;
-    const pnlStr=pnl!==null?`<span class="${pnl>=0?'text-profit':'text-loss'}">${pnlSign(pnl)}원${pct!==null?' ('+(pct>0?'+':'')+pct.toFixed(2)+'%)':''}</span>`:'';
+    const pnlStr=pnl!==null?`<span class="${pnl>=0?'text-profit':'text-loss'}">${usdPnl(pnl)}${pct!==null?' ('+(pct>0?'+':'')+pct.toFixed(2)+'%)':''}</span>`:'';
     const reasonMap={signal:'전략',stop_loss:'손절',trailing_stop:'트레일링',take_profit:'익절',profit_protect:'수익보호',stagnation:'정체',market_close:'장마감'};
     const reasonBase=reasonMap[t.reason]||t.reason||'';
     const reasonLabel=t.reason==='signal'&&t.strategy?stratLabel(t.strategy):reasonBase;
@@ -627,8 +640,8 @@ function renderTradePage(){
       <td><span class="side-tag ${t.side==='buy'?'buy':'sell'}">${t.side==='buy'?'BUY':'SELL'}</span></td>
       <td>${t.name||_names[t.symbol]||t.symbol}<span class="text-sub">${t.symbol}</span></td>
       <td class="text-right">${t.quantity}</td>
-      <td class="text-right">${fmt(t.price)}</td>
-      <td class="text-right">${t.fee?fmt(t.fee)+'원':''}</td>
+      <td class="text-right">${usd(t.price)}</td>
+      <td class="text-right">${t.fee?usd(t.fee):''}</td>
       <td class="text-right">${pnlStr}</td>
       <td>${reasonLabel}</td>
     </tr>`;
@@ -648,7 +661,7 @@ function tradePageLast(){const m=Math.ceil(_allTrades.length/_tradePageSize)-1;i
 // ── Config ──
 async function loadConfig(){
   try{
-    const r=await fetch('/api/quant/config');const d=await r.json();
+    const r=await fetch('/api/us/quant/config');const d=await r.json();
     const q=d.quant||{};
     document.getElementById('config-grid').innerHTML=[
       ['최대 종목수','max_stocks'],['모멘텀 기간','momentum_days'],
@@ -707,18 +720,21 @@ function _renderScanItems(items){
   document.getElementById('candidate-count').textContent=items.length+'개';
   if(!items.length){tb.innerHTML='<tr><td colspan="10" class="empty-row">조건에 맞는 종목 없음</td></tr>';return;}
   tb.innerHTML=items.map((s,i)=>{
-    const pct=100/(1+Math.exp(-2.5*s.score));
+    const pct=100/(1+Math.exp(-2.5*(s.score||0)));
+    const mom=s.momentum||0, sh=s.sharpe||0, at=s.avg_turnover||0, vs=s.volume_surge||0, atr=s.atr_pct||0;
+    const cr=s.change_rate!=null?s.change_rate:0;
+    const turnStr=at>=1e9?'$'+(at/1e9).toFixed(1)+'B':at>=1e6?'$'+(at/1e6).toFixed(1)+'M':at>0?'$'+(at/1e3).toFixed(0)+'K':'-';
     return `<tr>
       <td style="color:var(--text-tertiary)">${i+1}</td>
       <td><strong>${s.name||s.symbol}</strong> <span style="color:var(--text-tertiary);font-size:0.7rem">${s.symbol}</span></td>
-      <td class="text-right">${fmt(s.close)}</td>
-      <td class="text-right ${s.momentum>=0?'text-profit':'text-loss'}">${(s.momentum*100).toFixed(1)}%</td>
-      <td class="text-right ${s.sharpe>=0?'text-profit':'text-loss'}">${s.sharpe.toFixed(2)}</td>
-      <td class="text-right">${s.avg_turnover>=1e8?(s.avg_turnover/1e8).toFixed(1)+'억':(s.avg_turnover/1e4).toFixed(0)+'만'}</td>
-      <td class="text-right">${s.volume_surge.toFixed(1)}x</td>
-      <td class="text-right">${(s.atr_pct*100).toFixed(2)}%</td>
+      <td class="text-right">${s.close?usd(s.close):'-'}</td>
+      <td class="text-right ${cr>=0?'text-profit':'text-loss'}">${cr>0?'+':''}${cr.toFixed(1)}%</td>
+      <td class="text-right">${vs>0?vs.toFixed(1)+'x':'-'}</td>
+      <td class="text-right">${turnStr}</td>
+      <td class="text-right ${mom>=0?'text-profit':'text-loss'}">${(mom*100).toFixed(1)}%</td>
+      <td class="text-right">${atr>0?(atr*100).toFixed(2)+'%':'-'}</td>
       <td class="text-right">${s.rsi!=null?s.rsi.toFixed(0):'-'}</td>
-      <td class="text-right">${s.score.toFixed(3)}<span class="score-bar"><span class="score-fill" style="width:${pct}%"></span></span></td>
+      <td class="text-right">${(s.score||0).toFixed(3)}<span class="score-bar"><span class="score-fill" style="width:${pct}%"></span></span></td>
     </tr>`;
   }).join('');
 }
@@ -727,7 +743,7 @@ async function runScan(){
   btn.classList.add('loading');btn.textContent='스캔 중...';
   tb.innerHTML='<tr><td colspan="10" class="empty-row">스캔 중...</td></tr>';
   try{
-    const d=await fetch('/api/quant/scan?refresh=true').then(r=>r.json());
+    const d=await fetch('/api/us/quant/scan?refresh=true').then(r=>r.json());
     const items=d.data||[];
     _renderScanItems(items);
     try{sessionStorage.setItem('quant_scan',JSON.stringify(items))}catch{}
@@ -744,11 +760,11 @@ function renderPerf(stats){
   const tb=document.getElementById('perf-table');
   const keys=Object.keys(stats);
   if(!keys.length){tb.innerHTML='<tr><td colspan="7" class="empty-row">데이터 없음</td></tr>';return;}
-  tb.innerHTML=keys.map(k=>{const s=stats[k];const pnl=Number(s.total_pnl);const ap=s.avg_pnl_pct!=null?Number(s.avg_pnl_pct):null;return `<tr><td>${k}</td><td class="text-right">${s.trades}</td><td class="text-right">${s.wins}/${s.losses}</td><td class="text-right">${s.win_rate}%</td><td class="text-right ${pnl>=0?'text-profit':'text-loss'}">${pnlSign(pnl)}원</td><td class="text-right ${ap!==null?(ap>=0?'text-profit':'text-loss'):''}">${ap!==null?(ap>0?'+':'')+ap.toFixed(2)+'%':'-'}</td><td class="text-right text-loss">${fmt(s.max_drawdown)}원</td></tr>`;}).join('');
+  tb.innerHTML=keys.map(k=>{const s=stats[k];const pnl=Number(s.total_pnl);const ap=s.avg_pnl_pct!=null?Number(s.avg_pnl_pct):null;return `<tr><td>${k}</td><td class="text-right">${s.trades}</td><td class="text-right">${s.wins}/${s.losses}</td><td class="text-right">${s.win_rate}%</td><td class="text-right ${pnl>=0?'text-profit':'text-loss'}">${usdPnl(pnl)}</td><td class="text-right ${ap!==null?(ap>=0?'text-profit':'text-loss'):''}">${ap!==null?(ap>0?'+':'')+ap.toFixed(2)+'%':'-'}</td><td class="text-right text-loss">${usd(s.max_drawdown)}</td></tr>`;}).join('');
 }
 async function loadPerf(){
   try{
-    const d=await fetch('/api/performance').then(r=>r.json());
+    const d=await fetch('/api/us/performance').then(r=>r.json());
     renderPerf(d.data||{});
   }catch(e){document.getElementById('perf-table').innerHTML='<tr><td colspan="7" class="empty-row">오류</td></tr>';}
 }
@@ -766,8 +782,8 @@ function renderPerfHistPage(){
       <td class="text-right">${d.trades}</td>
       <td class="text-right">${d.wins}/${d.losses}</td>
       <td class="text-right">${d.win_rate}%</td>
-      <td class="text-right ${pnl>=0?'text-profit':'text-loss'}">${pnlSign(pnl)}원</td>
-      <td class="text-right ${cum>=0?'text-profit':'text-loss'}">${pnlSign(cum)}원</td>
+      <td class="text-right ${pnl>=0?'text-profit':'text-loss'}">${usdPnl(pnl)}</td>
+      <td class="text-right ${cum>=0?'text-profit':'text-loss'}">${usdPnl(cum)}</td>
     </tr>`;
   }).join('');
   if(total>_perfHistPageSize){
@@ -783,7 +799,7 @@ function perfHistNext(){const m=Math.ceil(_allPerfHistory.length/_perfHistPageSi
 function perfHistLast(){const m=Math.ceil(_allPerfHistory.length/_perfHistPageSize)-1;if(_perfHistPage<m){_perfHistPage=m;renderPerfHistPage();}}
 async function loadPerfHistory(){
   try{
-    const d=await fetch('/api/performance/history').then(r=>r.json());
+    const d=await fetch('/api/us/performance/history').then(r=>r.json());
     _allPerfHistory=d.data||[];_perfHistPage=0;
     document.getElementById('perf-history-badge').textContent=_allPerfHistory.length+'일';
     renderPerfHistPage();
@@ -794,7 +810,7 @@ async function loadPerfHistory(){
 async function fetchOhlcv(){
   const el=document.getElementById('ohlcv-status');el.textContent='갱신 중...';
   try{
-    const d=await fetch('/api/ohlcv/fetch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({interval:'1d',period:'3mo'})}).then(r=>r.json());
+    const d=await fetch('/api/us/ohlcv/fetch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({interval:'1d',period:'3mo'})}).then(r=>r.json());
     el.textContent=d.rows_added+'건 추가';toast('OHLCV 데이터 갱신 완료 ('+d.rows_added+'건)','success');
   }catch(e){el.textContent='오류';toast('갱신 실패','error');}
 }
@@ -805,10 +821,11 @@ async function startQuant(){
   if(!enabledStrats.length){toast('활성화된 전략이 없습니다. 전략을 먼저 선택하세요.','error');return;}
   const btn=document.getElementById('btn-start');btn.classList.add('loading');btn.textContent='시작 중...';
   try{
-    const d=await fetch('/api/actions/start',{method:'POST'}).then(r=>r.json());
+    const d=await fetch('/api/us/actions/start',{method:'POST'}).then(r=>r.json());
     if(d.success){
       toast('퀀트 트레이딩 시작 ('+d.symbols.length+'개 종목)','success');
       if(d.scan&&d.scan.length){_renderScanItems(d.scan);try{sessionStorage.setItem('quant_scan',JSON.stringify(d.scan))}catch{}}
+      loadMarketCondition();loadBalance();
     } else toast(d.error||'시작 실패','error');
   }catch(e){toast('오류: '+e.message,'error');}
   finally{btn.classList.remove('loading');btn.textContent='퀀트 시작';}
@@ -827,7 +844,7 @@ async function doAction(name,silent){
   const btn=!silent&&btnMap[name]?document.getElementById(btnMap[name]):null;
   let orig;if(btn){orig=btn.textContent;btn.classList.add('loading');btn.textContent='처리 중';}
   try{
-    const d=await fetch('/api/actions/'+name,{method:'POST'}).then(r=>r.json());
+    const d=await fetch('/api/us/actions/'+name,{method:'POST'}).then(r=>r.json());
     if(!silent){if(d.success)toast({start:'퀀트 시작',stop:'엔진 정지',liquidate:'전체 청산 완료'}[name]||'성공','success');else toast(d.error||'오류','error');}
   }catch(e){if(!silent)toast('오류: '+e.message,'error');}
   finally{if(btn){btn.classList.remove('loading');btn.textContent=orig;}}
@@ -836,20 +853,20 @@ async function doAction(name,silent){
 async function liquidateOne(symbol){
   const name=_names[symbol]||symbol;
   if(!confirm(name+' ('+symbol+') 청산하시겠습니까?'))return;
-  try{const d=await fetch('/api/actions/liquidate/'+symbol,{method:'POST'}).then(r=>r.json());if(d.success)toast(name+' 청산 완료','success');else toast('청산 실패: '+(d.error||''),'error');}catch(e){toast('오류: '+e.message,'error');}
+  try{const d=await fetch('/api/us/actions/liquidate/'+symbol,{method:'POST'}).then(r=>r.json());if(d.success)toast(name+' 청산 완료','success');else toast('청산 실패: '+(d.error||''),'error');}catch(e){toast('오류: '+e.message,'error');}
 }
 
 async function cancelAllOrders(){
-  try{const d=await fetch('/api/actions/cancel-all-orders',{method:'POST'}).then(r=>r.json());if(d.success)toast(d.cancelled>0?d.cancelled+'건 미체결 주문 취소':'미체결 주문 없음','success');else toast('실패: '+(d.error||''),'error');}catch(e){toast('오류: '+e.message,'error');}
+  try{const d=await fetch('/api/us/actions/cancel-all-orders',{method:'POST'}).then(r=>r.json());if(d.success)toast(d.cancelled>0?d.cancelled+'건 미체결 주문 취소':'미체결 주문 없음','success');else toast('실패: '+(d.error||''),'error');}catch(e){toast('오류: '+e.message,'error');}
 }
 
 // ── Data Load ──
 async function loadBalance(){
-  try{const d=await fetch('/api/balance').then(r=>r.json());if(d.balance){document.getElementById('balance').textContent=fmt(d.balance)+'원';if(d.prev_balance&&d.prev_balance!=='0'){const diff=Number(d.balance)-Number(d.prev_balance);const prevEl=document.getElementById('balance-prev');prevEl.textContent='전일 '+fmt(d.prev_balance)+'원 ('+(diff>=0?'+':'')+fmt(diff)+')';prevEl.style.color=diff>=0?'var(--profit)':'var(--loss)';}}}catch(e){}
+  try{const d=await fetch('/api/us/balance').then(r=>r.json());if(d.balance){document.getElementById('balance').textContent=usd(d.balance);if(d.prev_balance&&d.prev_balance!=='0'){const diff=Number(d.balance)-Number(d.prev_balance);const prevEl=document.getElementById('balance-prev');prevEl.textContent='전일 '+usd(d.prev_balance)+' ('+usdPnl(diff)+')';prevEl.style.color=diff>=0?'var(--profit)':'var(--loss)';}}}catch(e){}
 }
 
 async function loadTrades(){
-  try{const trades=await fetch('/api/trades').then(r=>r.json());trades.forEach(t=>{if(t.name)_names[t.symbol]=t.name;});_allTrades=trades;document.getElementById('trade-badge').textContent=trades.length+'건';_tradePage=0;renderTradePage();}catch(e){console.error('trades load failed',e);}
+  try{const trades=await fetch('/api/us/trades').then(r=>r.json());trades.forEach(t=>{if(t.name)_names[t.symbol]=t.name;});_allTrades=trades;document.getElementById('trade-badge').textContent=trades.length+'건';_tradePage=0;renderTradePage();}catch(e){console.error('trades load failed',e);}
 }
 
 // ── SSE ──
@@ -863,7 +880,7 @@ function applySseState(d){
 // ── Init ──
 async function loadInitial(){
   try{
-    const [status,positions]=await Promise.all([fetch('/api/status').then(r=>r.json()),fetch('/api/positions').then(r=>r.json())]);
+    const [status,positions]=await Promise.all([fetch('/api/us/status').then(r=>r.json()),fetch('/api/us/positions').then(r=>r.json())]);
     updateStatus(status);updatePositions(positions);
   }catch(e){console.error('initial load failed',e);}
   loadBalance();loadTrades();_restoreScan();
@@ -873,7 +890,7 @@ async function loadInitial(){
 }
 async function loadMarketCondition(){
   try{
-    const mc=await fetch('/api/market-condition').then(r=>r.json());
+    const mc=await fetch('/api/us/market-condition').then(r=>r.json());
     if(mc.regime){
       _marketCondition=mc;
       const chip=document.getElementById('market-condition-chip');
@@ -891,7 +908,7 @@ async function loadMarketCondition(){
 }
 
 const badge=document.getElementById('conn-badge');
-const es=new EventSource('/api/events');
+const es=new EventSource('/api/us/events');
 es.addEventListener('state',e=>{try{applySseState(JSON.parse(e.data))}catch(err){console.error(err)}});
 es.addEventListener('performance',e=>{try{renderPerf(JSON.parse(e.data))}catch(err){console.error(err)}});
 es.onopen=()=>{badge.textContent='LIVE';badge.className='conn-badge conn-live';};
@@ -908,7 +925,7 @@ const _spLabels={
 let _stratSettings={};
 async function loadSettings(){
   try{
-    const d=await fetch('/api/settings').then(r=>r.json());
+    const d=await fetch('/api/us/settings').then(r=>r.json());
     const r=d.risk||{};
     document.getElementById('set-stop-loss').value=r.stop_loss_ratio??'';
     document.getElementById('set-take-profit').value=r.take_profit_ratio??'';
@@ -976,7 +993,7 @@ async function saveSettings(){
     strategies:collectStratSettings(),
   };
   try{
-    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const r=await fetch('/api/us/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
     const d=await r.json();
     if(d.success) toast('설정 저장 완료','success');
     else toast('설정 저장 실패','error');
@@ -986,7 +1003,7 @@ async function persistSettings(){
   if(!confirm('현재 설정을 settings.toml에 덮어쓰시겠습니까?\n(서버 재시작 후에도 유지됩니다)')) return;
   await saveSettings();
   try{
-    const r=await fetch('/api/settings/persist',{method:'POST',headers:{'Content-Type':'application/json'}});
+    const r=await fetch('/api/us/settings/persist',{method:'POST',headers:{'Content-Type':'application/json'}});
     const d=await r.json();
     if(d.success) toast('settings.toml 저장 완료','success');
     else toast('저장 실패: '+(d.error||''),'error');
@@ -1008,7 +1025,7 @@ async function applyJson(){
     }
   }
   try{
-    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(obj)});
+    const r=await fetch('/api/us/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(obj)});
     const d=await r.json();
     if(d.success){toast('JSON 적용 완료 ('+d.applied.join(', ')+')','success');ta.value='';loadSettings();}
     else toast('적용 실패','error');
@@ -1027,9 +1044,9 @@ fetch('/api/market').then(r=>r.json()).then(d=>{
   const kr=document.getElementById('mt-kr'),us=document.getElementById('mt-us');
   kr.querySelector('.mt-dot').className='mt-dot '+(d.market==='kr'?'live':'off');
   us.querySelector('.mt-dot').className='mt-dot '+(d.market==='us'?'live':'off');
-  if(d.market!=='kr'){
-    if(confirm('현재 서버가 US 모드입니다. KRX 모드로 전환하시겠습니까?')){
-      switchMarket('kr');
+  if(d.market!=='us'){
+    if(confirm('현재 서버가 KRX 모드입니다. US 모드로 전환하시겠습니까?')){
+      switchMarket('us');
     }
   }
 }).catch(()=>{});

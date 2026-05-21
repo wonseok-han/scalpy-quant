@@ -166,13 +166,13 @@ def scan_market_universe(
 
 
 class QuantScreener:
-    """OHLCV 히스토리 기반 퀀트 종목 스크리너.
+    """OHLCV 히스토리 + 장중 실시간 데이터 기반 퀀트 종목 스크리너.
 
-    점수 = 리스크 조정 모멘텀(샤프) 35%
-         + 거래량 급증 20%
-         + 유동성(평균거래대금) 15%
-         + RSI 적정구간 15%
-         + ATR%(변동성 기회) 15%
+    장중 실시간 데이터 있을 때:
+      샤프 25% + 일봉 거래량급증 10% + 유동성 10% + RSI 10% + ATR% 10%
+      + 장중 거래량비율 20% + 장중 모멘텀 15%
+    실시간 데이터 없을 때 (fallback):
+      샤프 35% + 거래량급증 20% + 유동성 15% + RSI 15% + ATR% 15%
     """
 
     def __init__(
@@ -194,7 +194,10 @@ class QuantScreener:
         self._last_scan: list[dict[str, Any]] = []
 
     def scan(
-        self, symbols: list[str], held_symbols: list[str] | None = None
+        self,
+        symbols: list[str],
+        held_symbols: list[str] | None = None,
+        live_data: dict[str, dict] | None = None,
     ) -> list[str]:
         held = set(held_symbols or [])
         warned = get_warn_symbols()
@@ -211,7 +214,8 @@ class QuantScreener:
             if len(candles) < self._momentum_days:
                 continue
 
-            factors = self._calc_factors(candles)
+            live = (live_data or {}).get(sym)
+            factors = self._calc_factors(candles, live)
             if factors is None:
                 continue
 
@@ -283,7 +287,7 @@ class QuantScreener:
             return "below"
         return "inside"
 
-    def _calc_factors(self, candles: list[dict]) -> dict[str, Any] | None:
+    def _calc_factors(self, candles: list[dict], live: dict | None = None) -> dict[str, Any] | None:
         closes = [c["close"] for c in candles]
         volumes = [c["volume"] for c in candles]
         highs = [c["high"] for c in candles]
@@ -292,10 +296,8 @@ class QuantScreener:
         if closes[0] == 0 or len(closes) < 2:
             return None
 
-        # 모멘텀: 기간 수익률
         momentum = (closes[-1] - closes[0]) / closes[0]
 
-        # 일간 수익률
         returns = [
             (closes[i] - closes[i - 1]) / closes[i - 1]
             for i in range(1, len(closes))
@@ -303,26 +305,21 @@ class QuantScreener:
         ]
         volatility = _std(returns) if len(returns) > 1 else 0
 
-        # 샤프 비율 (일간 수익률 평균 / 표준편차, 무위험 수익률 0 가정)
         avg_return = sum(returns) / len(returns) if returns else 0
         sharpe = avg_return / volatility if volatility > 0 else 0
 
-        # 평균 거래량
         avg_volume = sum(volumes) / len(volumes) if volumes else 0
 
-        # 평균 거래대금 (유동성)
         avg_turnover = (
             sum(c * v for c, v in zip(closes, volumes)) / len(closes) if closes else 0
         )
 
-        # 거래량 급증: 최근 5일 vs 그 이전 전체
         recent_n = min(5, len(volumes))
         prior_n = len(volumes) - recent_n
         vol_recent = sum(volumes[-recent_n:]) / recent_n if recent_n > 0 else 0
         vol_prior = sum(volumes[:prior_n]) / prior_n if prior_n > 0 else vol_recent
         volume_surge = vol_recent / vol_prior if vol_prior > 0 else 1.0
 
-        # ATR% (변동성 기회 — 높을수록 스윙 폭이 큼)
         true_ranges = []
         for i in range(1, len(candles)):
             tr = max(
@@ -334,10 +331,17 @@ class QuantScreener:
         atr = sum(true_ranges) / len(true_ranges) if true_ranges else 0
         atr_pct = atr / closes[-1] if closes[-1] > 0 else 0
 
-        # RSI
         rsi = self._calc_rsi(closes)
 
         cloud_pos = self._ichimoku_cloud_position(candles)
+
+        intraday_vol_ratio = None
+        intraday_change = None
+        if live and avg_volume > 0:
+            live_vol = live.get("volume", 0)
+            if live_vol > 0:
+                intraday_vol_ratio = round(live_vol / avg_volume, 2)
+            intraday_change = live.get("change_rate")
 
         return {
             "momentum": round(momentum, 4),
@@ -350,6 +354,8 @@ class QuantScreener:
             "rsi": round(rsi, 1) if rsi is not None else None,
             "close": closes[-1],
             "cloud_position": cloud_pos,
+            "intraday_vol_ratio": intraday_vol_ratio,
+            "intraday_change": intraday_change,
         }
 
     def _calc_rsi(self, closes: list[int], period: int = 14) -> float | None:
@@ -370,7 +376,8 @@ class QuantScreener:
         if not scored:
             return []
 
-        # z-score 정규화: (값 - 평균) / 표준편차 → 이상치에 덜 민감
+        has_live = any(s.get("intraday_vol_ratio") is not None for s in scored)
+
         sharpes = [s["sharpe"] for s in scored]
         surges = [s["volume_surge"] for s in scored]
         turnovers = [s["avg_turnover"] for s in scored]
@@ -381,35 +388,51 @@ class QuantScreener:
         mu_turn, sd_turn = _mean_std(turnovers)
         mu_atr, sd_atr = _mean_std(atrs)
 
+        if has_live:
+            intra_vols = [s.get("intraday_vol_ratio", 1.0) for s in scored]
+            intra_chgs = [s.get("intraday_change", 0.0) or 0.0 for s in scored]
+            mu_ivol, sd_ivol = _mean_std(intra_vols)
+            mu_ichg, sd_ichg = _mean_std(intra_chgs)
+
         for s in scored:
-            # 1) 리스크 조정 모멘텀 (샤프): z-score
             z_sharpe = (s["sharpe"] - mu_sharpe) / sd_sharpe if sd_sharpe > 0 else 0
-
-            # 2) 거래량 급증: z-score
             z_surge = (s["volume_surge"] - mu_surge) / sd_surge if sd_surge > 0 else 0
-
-            # 3) 유동성(거래대금): z-score
             z_turn = (s["avg_turnover"] - mu_turn) / sd_turn if sd_turn > 0 else 0
 
-            # 4) RSI 적정구간: 연속 점수 (40 최적, 양쪽으로 감쇠)
             rsi_score = 0.0
             if s["rsi"] is not None:
                 rsi_score = math.exp(-0.5 * ((s["rsi"] - 40) / 15) ** 2)
 
-            # 5) ATR% (변동성 기회): z-score
             z_atr = (s["atr_pct"] - mu_atr) / sd_atr if sd_atr > 0 else 0
 
             cloud_bonus = 0.3 if self._ichimoku_filter and s.get("cloud_position") == "above" else 0.0
 
-            s["score"] = round(
-                z_sharpe * 0.35
-                + z_surge * 0.20
-                + z_turn * 0.15
-                + rsi_score * 0.15
-                + z_atr * 0.15
-                + cloud_bonus,
-                4,
-            )
+            if has_live:
+                ivr = s.get("intraday_vol_ratio", 1.0) or 1.0
+                z_ivol = (ivr - mu_ivol) / sd_ivol if sd_ivol > 0 else 0
+                ichg = s.get("intraday_change", 0.0) or 0.0
+                z_ichg = (ichg - mu_ichg) / sd_ichg if sd_ichg > 0 else 0
+                s["score"] = round(
+                    z_sharpe * 0.25
+                    + z_surge * 0.10
+                    + z_turn * 0.10
+                    + rsi_score * 0.10
+                    + z_atr * 0.10
+                    + z_ivol * 0.20
+                    + z_ichg * 0.15
+                    + cloud_bonus,
+                    4,
+                )
+            else:
+                s["score"] = round(
+                    z_sharpe * 0.35
+                    + z_surge * 0.20
+                    + z_turn * 0.15
+                    + rsi_score * 0.15
+                    + z_atr * 0.15
+                    + cloud_bonus,
+                    4,
+                )
 
         scored.sort(key=lambda s: s["score"], reverse=True)
         return scored[: self._max_stocks]

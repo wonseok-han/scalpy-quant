@@ -143,6 +143,21 @@ body {
   align-self: stretch;
 }
 
+/* ── Market Toggle (nav-item과 동일 스타일) ── */
+.market-toggle {
+  display: inline-flex;
+  align-items: stretch;
+  margin-left: auto;
+  flex-shrink: 0;
+  gap: 0;
+}
+.market-toggle .mt-dot {
+  width: 5px; height: 5px; border-radius: 50%;
+  flex-shrink: 0;
+}
+.market-toggle .mt-dot.off { background: var(--text-tertiary); opacity: 0.3; }
+.market-toggle .mt-dot.live { background: var(--profit); box-shadow: 0 0 5px rgba(34,197,94,0.6); }
+
 /* ── Buttons ── */
 .btn {
   padding: 7px 14px;

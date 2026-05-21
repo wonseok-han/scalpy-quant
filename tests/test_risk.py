@@ -9,7 +9,6 @@ class TestRiskManager:
     def setup_method(self) -> None:
         self.risk = RiskManager(
             stop_loss_ratio=0.02,
-            take_profit_ratio=0.03,
             max_position_size=100,
         )
 
@@ -34,28 +33,6 @@ class TestRiskManager:
             strategy="rsi",
         )
         assert self.risk.check_stop_loss(pos) is False
-
-    def test_take_profit_triggered(self) -> None:
-        pos = Position(
-            symbol="005930",
-            side=Side.BUY,
-            quantity=10,
-            avg_price=Decimal("72000"),
-            current_price=Decimal("74200"),  # +3.05%
-            strategy="rsi",
-        )
-        assert self.risk.check_take_profit(pos) is True
-
-    def test_take_profit_not_triggered(self) -> None:
-        pos = Position(
-            symbol="005930",
-            side=Side.BUY,
-            quantity=10,
-            avg_price=Decimal("72000"),
-            current_price=Decimal("73000"),  # +1.38%
-            strategy="rsi",
-        )
-        assert self.risk.check_take_profit(pos) is False
 
     def test_validate_order_exceeds_max_size(self) -> None:
         order = Order(

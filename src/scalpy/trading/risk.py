@@ -12,7 +12,6 @@ class RiskManager:
     def __init__(
         self,
         stop_loss_ratio: float = 0.02,
-        take_profit_ratio: float = 0.03,
         max_position_size: int = 100,
         max_open_positions: int = 3,
         max_position_ratio: float = 0.3,
@@ -20,11 +19,10 @@ class RiskManager:
         stagnation_threshold: float = 0.005,
         trailing_activate_ratio: float = 0.01,
         trailing_stop_ratio: float = 0.01,
-        profit_protect_activate: float = 0,
-        profit_protect_ratio: float = 0.001,
+        profit_protect_activate: float = 0.008,
+        profit_protect_ratio: float = 0.005,
     ) -> None:
         self.stop_loss_ratio = Decimal(str(stop_loss_ratio))
-        self.take_profit_ratio = Decimal(str(take_profit_ratio))
         self.trailing_activate_ratio = Decimal(str(trailing_activate_ratio))
         self.trailing_stop_ratio = Decimal(str(trailing_stop_ratio))
         self.profit_protect_activate = Decimal(str(profit_protect_activate))
@@ -46,20 +44,6 @@ class RiskManager:
                 "risk.stop_loss_triggered",
                 symbol=position.symbol,
                 loss_ratio=str(loss_ratio),
-            )
-        return triggered
-
-    def check_take_profit(self, position: Position, override_ratio: Decimal | None = None) -> bool:
-        if position.quantity == 0:
-            return False
-        ratio = override_ratio if override_ratio is not None else self.take_profit_ratio
-        gain_ratio = (position.current_price - position.avg_price) / position.avg_price
-        triggered = gain_ratio >= ratio
-        if triggered:
-            logger.info(
-                "risk.take_profit_triggered",
-                symbol=position.symbol,
-                gain_ratio=str(gain_ratio),
             )
         return triggered
 
@@ -87,23 +71,27 @@ class RiskManager:
         return triggered
 
     def check_profit_protect(self, position: Position) -> bool:
-        if self.profit_protect_activate <= 0:
-            return False
         if position.quantity == 0 or position.avg_price <= 0 or position.peak_price <= 0:
             return False
-        if self.is_trailing_active(position):
+        if self.profit_protect_activate <= 0:
+            return False
+        gain = (position.current_price - position.avg_price) / position.avg_price
+        if gain < Decimal("0"):
             return False
         peak_gain = (position.peak_price - position.avg_price) / position.avg_price
         if peak_gain < self.profit_protect_activate:
             return False
-        current_gain = (position.current_price - position.avg_price) / position.avg_price
-        triggered = current_gain <= self.profit_protect_ratio
+        if gain >= self.trailing_activate_ratio:
+            return False
+        drop = (position.peak_price - position.current_price) / position.peak_price
+        triggered = drop >= self.profit_protect_ratio
         if triggered:
             logger.info(
                 "risk.profit_protect_triggered",
                 symbol=position.symbol,
-                peak_gain=str(peak_gain),
-                current_gain=str(current_gain),
+                peak_gain=str(round(peak_gain, 4)),
+                current_gain=str(round(gain, 4)),
+                drop=str(round(drop, 4)),
             )
         return triggered
 

@@ -1,4 +1,8 @@
 [default]
+# 로그 레벨 (DEBUG/INFO/WARNING/ERROR, 파일로그는 이 레벨, 콘솔은 INFO 고정)
+log_level = "DEBUG"
+# 시장 모드 ("kr": 국내주식, "us": 미국주식)
+market = "kr"
 # 모의투자 모드 (true: 모의투자, false: 실거래)
 # 실거래 전환은 이 파일에서만 가능 (CLI 인자 불가)
 mock = false
@@ -28,26 +32,24 @@ auto_start = false
 # 자동매매 대상 종목코드 목록 (최대 20종목, WebSocket 구독 제한)
 symbols = ["005930", "000660"]
 # 종목당 최대 보유 수량
-max_position_size = 100
+max_position_size = 1000
 # 종목당 최대 투입 비율 (0.3 = 잔고의 30%, 가격 × 수량이 이 비율 초과 시 수량 축소)
-max_position_ratio = 0.4
+max_position_ratio = 0.5
 # 동시 보유 최대 포지션 수 (초과 시 신규 매수 차단)
-max_open_positions = 3
+max_open_positions = 2
 # 장 마감 시 자동 청산 (true: 스캘핑 기본, false: 퀀트 오버나이트 보유)
 market_close_liquidate = true
-# 손절 비율 (0.003 = 0.3%, 평균단가 대비 하락 시 자동 청산)
+# 손절 비율 (0.02 = 2%, 평균단가 대비 하락 시 자동 청산)
 stop_loss_ratio = 0.02
-# 익절 비율 (trailing stop 사용 시 비상 상한으로만 동작)
-take_profit_ratio = 0.03
 # Trailing Stop: 고점 추적 매도
-# 활성화 기준 (0.01 = 1%, 매수가 대비 이 이상 수익 시 고점 추적 시작)
+# 활성화 기준 (0.015 = 1.5%, 매수가 대비 이 이상 수익 시 고점 추적 시작)
 trailing_activate_ratio = 0.015
-# 매도 기준 (0.01 = 1%, 고점 대비 이 이상 하락 시 매도)
+# 매도 기준 (0.005 = 0.5%, 고점 대비 이 이상 하락 시 매도)
 trailing_stop_ratio = 0.005
-# 수익 보호 스탑: trailing 활성화 전 본전 방어
-# 활성화 기준 (0.005 = 0.5%, peak gain이 이 이상 도달한 적 있으면 보호 시작, 0 = 비활성화)
+# Profit Protect: 소폭 수익 보호 (trailing 활성화 전 구간)
+# 활성화 기준 (0.008 = 0.8%, 매수가 대비 고점이 이 이상 수익 도달 이력 시 보호 시작)
 profit_protect_activate = 0.008
-# 매도 기준 (0.002 = 0.2%, 현재 수익률이 이 이하로 떨어지면 매도)
+# 매도 기준 (0.005 = 0.5%, 고점 대비 이 이상 하락 시 매도)
 profit_protect_ratio = 0.005
 # 강제 청산 분할 매도 횟수 (1 = 전량 일괄, 3 = 3분할 매도, 슬리피지 방지)
 force_close_splits = 3
@@ -96,7 +98,7 @@ chat_id = ""
 
 [default.strategies]
 # 퀀트 활성 전략
-# 사용 가능: momentum, mean_reversion, factor, ichimoku
+# 사용 가능: momentum, mean_reversion, factor, ichimoku, volume_spike
 quant_enabled = []
 
 [default.strategies.momentum]
@@ -107,9 +109,8 @@ volume_multiplier = 2
 # 고점 돌파 비율 (0.005 = 0.5%, 최근 고점 대비 이 비율 이상 상승 시 진입)
 breakout_pct = 0.01
 cooldown_seconds = 300
-# 단기 퀀트용 손절/익절 (1시간~1일 보유 기준)
+# 단기 퀀트용 손절 (1시간~1일 보유 기준)
 stop_loss_ratio = 0.015
-take_profit_ratio = 0.05
 
 [default.strategies.mean_reversion]
 # 볼린저밴드 관측 윈도우 (분봉 개수)
@@ -121,9 +122,10 @@ candle_minutes = 3
 # 최소 체결량 (이하 틱 무시)
 min_tick_volume = 5
 cooldown_seconds = 600
-# 밴드 복귀 대기 시간 감안 넓은 손절/익절
+# 장 초반 매수 유예 (실시간 캔들 N개 수집 전까지 BUY 차단, SELL은 허용)
+open_grace_candles = 5
+# 밴드 복귀 대기 시간 감안 넓은 손절
 stop_loss_ratio = 0.01
-take_profit_ratio = 0.04
 
 [default.strategies.factor]
 # 팩터 관측 윈도우
@@ -138,9 +140,8 @@ weight_momentum = 0.4
 weight_volume = 0.3
 weight_orderbook = 0.3
 cooldown_seconds = 180
-# 복합 팩터 — 가장 넓은 손절/익절
+# 복합 팩터 — 넓은 손절
 stop_loss_ratio = 0.015
-take_profit_ratio = 0.04
 
 [default.strategies.ichimoku]
 # 전환선 기간 (봉 수)
@@ -154,5 +155,43 @@ candle_minutes = 1
 # 최소 체결량 (이하 틱 무시)
 min_tick_volume = 5
 cooldown_seconds = 300
+# 장 초반 매수 유예 (실시간 캔들 N개 수집 전까지 BUY 차단, SELL은 허용)
+open_grace_candles = 10
+# 구름 대비 과열 매수 차단 (0.01 = 1%, 구름 상단 대비 이 이상 올라가면 BUY 차단)
+max_cloud_distance = 0.01
 # 추세 추종 — 손절만 설정, 익절은 trailing에 위임
-stop_loss_ratio = 0.025
+stop_loss_ratio = 0.02
+
+[default.strategies.volume_spike]
+# 거래량 비교 기준 분봉 수 (최근 N분 평균)
+baseline_window = 10
+# 거래량 급증 배수 (평균 대비 N배 이상이면 폭발 판정)
+spike_ratio = 1.0
+# 최소 가격 상승률 (0.005 = 0.5%, 거래량 폭발 + 이 이상 상승 시 진입)
+min_surge_pct = 0.005
+# 최대 가격 상승률 (0.08 = 8%, 이미 너무 올라간 종목 제외)
+max_surge_pct = 0.08
+# 봉 집계 간격 (분)
+candle_minutes = 1
+cooldown_seconds = 120
+# 급등 추격 — 타이트한 손절, 익절은 trailing에 위임
+stop_loss_ratio = 0.015
+
+[default.us_trading]
+# 미장 자동매매 설정 (market = "us" 일 때 사용)
+auto_start = false
+symbols = ["AAPL", "MSFT", "NVDA"]
+# 기본 거래소 (NASD/NYSE/AMEX, 스크리닝 시 3거래소 자동 통합 스캔)
+exchange = "NASD"
+max_position_size = 1000
+max_position_ratio = 0.5
+max_open_positions = 2
+market_close_liquidate = true
+stop_loss_ratio = 0.015
+trailing_activate_ratio = 0.015
+trailing_stop_ratio = 0.005
+profit_protect_activate = 0.008
+profit_protect_ratio = 0.005
+force_close_splits = 1
+min_hold_seconds = 60
+close_cooldown_seconds = 300
